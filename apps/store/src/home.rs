@@ -12,7 +12,7 @@ pub(super) fn render(catalog: &Catalog) {
         .cloned()
         .collect();
     if apps.is_empty() {
-        text("Select All sources or Arch to discover desktop apps.");
+        text("Select All sources to discover desktop apps.");
         return;
     }
     featured(&apps);
@@ -21,7 +21,8 @@ pub(super) fn render(catalog: &Catalog) {
         .iter()
         .filter_map(|name| apps.iter().find(|a| a.package == *name).cloned())
         .collect();
-    shelf("Everyday essentials", "A few great places to start, handpicked from Arch.", "starred-symbolic", "accent", &picks, None);
+    let from = if nyx_store::nix::active() { "A few great places to start." } else { "A few great places to start, handpicked from Arch." };
+    shelf("Everyday essentials", from, "starred-symbolic", "accent", &picks, None);
     for (category, title, copy) in [
         ("Graphics", "Make something extraordinary", "From the first sketch to the final frame."),
         ("Audio & video", "Your own creative studio", "Record it. Cut it. Share it with the world."),
@@ -124,7 +125,11 @@ fn featured(apps: &[App]) {
         action.set_halign(gtk::Align::Start);
         words.append(&action);
         let tag = widgets::label(
-            &format!("{}{}", app.source, if app.installed.is_some() { " · In your library" } else { " · Available on Arch" }),
+            &format!("{}{}", app.source, match (app.installed.is_some(), nyx_store::nix::active()) {
+                (true, _) => " · In your library",
+                (false, true) => " · Available",
+                (false, false) => " · Available on Arch",
+            }),
             "source-tag",
         );
         tag.set_xalign(0.0);

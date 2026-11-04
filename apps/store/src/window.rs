@@ -157,10 +157,10 @@ fn build(app: &gtk::Application) {
     column.add_css_class("settings-content");
     column.set_hexpand(true);
     let search = gtk::SearchEntry::new();
-    search.set_placeholder_text(Some("Search apps and AUR  (Ctrl+F)"));
+    search.set_placeholder_text(Some(&format!("{}  (Ctrl+F)", search_label())));
     search.add_css_class("bar-search");
     search.set_width_chars(SEARCH_WIDE);
-    search.update_property(&[gtk::accessible::Property::Label("Search apps and AUR")]);
+    search.update_property(&[gtk::accessible::Property::Label(search_label())]);
     search.connect_stop_search(|e| e.set_text(""));
     let toolbar = widgets::hbox(8);
     toolbar.add_css_class("store-toolbar");
@@ -426,7 +426,7 @@ fn responsive() {
         child = c.next_sibling();
     }
     u.search.set_width_chars(if narrow { SEARCH_NARROW } else { SEARCH_WIDE });
-    u.search.set_placeholder_text(Some(if narrow { "Search apps" } else { "Search apps and AUR  (Ctrl+F)" }));
+    u.search.set_placeholder_text(Some(&if narrow { "Search apps".to_string() } else { format!("{}  (Ctrl+F)", search_label()) }));
     u.status.set_visible(!narrow || u.busy.get() || u.loading.get());
     u.packages.set_label(Some(if width > 0 && width < 900 { "Packages" } else { "Include packages" }));
 }
@@ -697,9 +697,10 @@ fn render() {
     }
     if !u.busy.get() {
         u.status.set_text(&format!(
-            "{} apps · {} installed · Omarchy first",
+            "{} apps · {} installed · {}",
             c.apps.iter().filter(|a| a.desktop).map(|a| &a.package).collect::<BTreeSet<_>>().len(),
-            c.apps.iter().filter(|a| a.desktop && a.installed.is_some()).map(|a| &a.package).collect::<BTreeSet<_>>().len()
+            c.apps.iter().filter(|a| a.desktop && a.installed.is_some()).map(|a| &a.package).collect::<BTreeSet<_>>().len(),
+            if nyx_store::nix::active() { "Flathub and nixpkgs" } else { "Omarchy first" }
         ));
     }
 }
@@ -928,6 +929,18 @@ fn details(app: App) {
 }
 
 fn render_updates(c: &Catalog) {
+    if nyx_store::nix::active() {
+        heading(
+            "Updates",
+            "Updates your Flathub apps and the nixpkgs packages in your profile. The system updates with NyxOS.",
+        );
+        for change in &c.updates {
+            text(&format!("{} {}", change.name, change.new.as_deref().unwrap_or("")));
+        }
+        let update = button("Update my apps", || start_request(Request::Update));
+        ui().body.append(&update);
+        return;
+    }
     heading(
         "Repository updates",
         "Arch updates are coordinated across the system. Store verifies every package’s original source before installation.",
@@ -1695,4 +1708,9 @@ fn load_picture(app: &App, index: usize, picture: &gtk::Picture) {
                 }
             }
     });
+}
+
+/// The search field's words: AUR on Arch, nixpkgs on NixOS.
+fn search_label() -> &'static str {
+    if nyx_store::nix::active() { "Search apps and nixpkgs" } else { "Search apps and AUR" }
 }

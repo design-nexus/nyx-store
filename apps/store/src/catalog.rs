@@ -74,7 +74,11 @@ fn category(raw: &[String]) -> String {
 pub fn parse(xml: &str) -> Result<Vec<App>> {
     let doc = roxmltree::Document::parse(xml)?;
     let mut apps = Vec::new();
-    for c in doc.descendants().filter(|n| n.has_tag_name("component") && n.attribute("type") == Some("desktop-application")) {
+    // "desktop" is the older name some catalogs (Flathub's) still use.
+    for c in doc
+        .descendants()
+        .filter(|n| n.has_tag_name("component") && matches!(n.attribute("type"), Some("desktop-application" | "desktop")))
+    {
         let text = |tag| {
             c.children()
                 .find(|n| n.has_tag_name(tag) && n.attribute(("http://www.w3.org/XML/1998/namespace", "lang")).is_none())
