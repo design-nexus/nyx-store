@@ -1394,8 +1394,9 @@ fn transaction_review(plan: Plan) {
     let note = widgets::label(
         &if nyx_store::nix::active() {
             format!(
-                "{} changes. Software for everyone is built into a new system generation first, and only switched to when the build works. Applying asks for an administrator's password.",
-                plan.changes.len()
+                "{} {}. Software for everyone is built into a new system generation first, and only switched to when the build works. Applying asks for an administrator's password.",
+                plan.changes.len(),
+                if plan.changes.len() == 1 { "change" } else { "changes" }
             )
         } else {
             format!(
