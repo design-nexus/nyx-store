@@ -106,7 +106,7 @@ fn prepare(h: &mut Alpm, request: &Request, sources: &BTreeMap<String, (String, 
         });
     }
     changes.sort_by(|a, b| a.name.cmp(&b.name));
-    Ok(Plan { changes, snapshot: packages::snapshot(h) })
+    Ok(Plan { changes, snapshot: packages::snapshot(h), notes: Vec::new() })
 }
 
 fn add_upgrades(h: &Alpm, sources: &BTreeMap<String, (String, String)>) -> Result<()> {

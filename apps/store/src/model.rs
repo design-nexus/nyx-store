@@ -40,6 +40,9 @@ pub struct Change {
 pub struct Plan {
     pub changes: Vec<Change>,
     pub snapshot: String,
+    /// What the person agrees to before applying (unfree licenses, services, groups).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -48,6 +51,8 @@ pub enum Request {
     Install { source: String, packages: Vec<String> },
     Remove { package: String },
     Update,
+    /// NixOS: back to the system generation before this one.
+    Rollback,
     BlackarchSetup,
     Sources { assignments: Vec<(String, String, String)> },
     Repository { repository: crate::repositories::Repository },

@@ -1012,6 +1012,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "nyx-catalog"
+version = "0.1.0"
+source = "git+https://github.com/nyxos-project/nyx-system.git?rev=30ec963b8f56032739c589390a10eed9796374c5#30ec963b8f56032739c589390a10eed9796374c5"
+dependencies = [
+ "anyhow",
+ "nyx-system-proto",
+ "serde",
+ "toml",
+]
+
+[[package]]
 name = "nyx-core"
 version = "0.1.0"
 source = "git+https://github.com/design-nexus/nyx-core.git?rev=52cba5e27a3dd5f00c780f53e423302b4b5f9c9c#52cba5e27a3dd5f00c780f53e423302b4b5f9c9c"
@@ -1050,7 +1061,9 @@ dependencies = [
  "gtk4",
  "image",
  "libc",
+ "nyx-catalog",
  "nyx-core",
+ "nyx-system-proto",
  "nyx-theme",
  "nyx-ui",
  "roxmltree",
@@ -1060,6 +1073,16 @@ dependencies = [
  "sha2",
  "toml",
  "ureq",
+]
+
+[[package]]
+name = "nyx-system-proto"
+version = "0.1.0"
+source = "git+https://github.com/nyxos-project/nyx-system.git?rev=30ec963b8f56032739c589390a10eed9796374c5#30ec963b8f56032739c589390a10eed9796374c5"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

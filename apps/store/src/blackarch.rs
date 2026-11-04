@@ -196,6 +196,7 @@ pub fn setup(handle: &mut Alpm, provenance: &mut Provenance) -> Result<()> {
                     source: "blackarch".into(),
                     bytes: package.size(),
                 }],
+                notes: Vec::new(),
             };
             provenance.begin(&plan)?;
             handle.trans_commit().map_err(|e| anyhow::anyhow!("Cannot install BlackArch support: {e:?}"))?;

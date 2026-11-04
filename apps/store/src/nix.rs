@@ -1,9 +1,13 @@
-//! NixOS: apps from Flathub (Flatpak) and nixpkgs (`nix profile`), both installed into
-//! the user's own profile, so nothing needs the root helper. Flathub's AppStream data
-//! supplies descriptions, icons and screenshots, for nixpkgs' apps too.
+//! NixOS (NyxOS): three sources. The NyxOS software catalog (Nyx apps and curated
+//! software, shared with Nyx Welcome) and nixpkgs install for everyone through the Nyx
+//! System Manager (`nyx-system`), as one rebuild that's only switched to when it builds;
+//! Flathub apps install for the user. Updates are the system's (NyxOS, its Nyx apps and
+//! everything installed for everyone, together) and Flathub's, and a system change can
+//! be undone by going back a generation.
 //!
 //! Requests and events are the pacman helper's, so the window shows the same review
-//! before anything changes.
+//! before anything changes; the review lists what has to be agreed to. Packages an older
+//! Store put in the user's `nix profile` still show, and can be updated and removed.
 
 use crate::{
     catalog::{self, Catalog},
@@ -11,51 +15,96 @@ use crate::{
 };
 use anyhow::{Context, Result, bail, ensure};
 use flate2::read::GzDecoder;
+use nyx_catalog::{Catalog as Software, Installed as Have, Item, Tier};
+use nyx_system_proto::{Change as SystemChange, SystemSettings};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs,
-    io::{BufRead, BufReader, Read},
+    io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
 };
 
 pub const FLATHUB: &str = "flathub";
 pub const NIXPKGS: &str = "nixpkgs";
+/// The NyxOS software catalog.
+pub const NYXOS: &str = "nyxos";
 const FLATHUB_REPO: &str = "https://dl.flathub.org/repo/flathub.flatpakrepo";
 const SYSTEM: &str = "legacyPackages.x86_64-linux.";
+const PROFILES: &str = "/nix/var/nix/profiles";
 
-/// The editorial picks in nixpkgs: attribute, the Flathub app whose description and
-/// artwork they share, and the category.
-const PICKS: &[(&str, &str, &str)] = &[
-    ("firefox", "org.mozilla.firefox", "Internet"),
-    ("chromium", "org.chromium.Chromium", "Internet"),
-    ("thunderbird", "org.mozilla.Thunderbird", "Internet"),
-    ("signal-desktop", "org.signal.Signal", "Internet"),
-    ("telegram-desktop", "org.telegram.desktop", "Internet"),
-    ("transmission_4-gtk", "com.transmissionbt.Transmission", "Internet"),
-    ("libreoffice-fresh", "org.libreoffice.LibreOffice", "Productivity"),
-    ("keepassxc", "org.keepassxc.KeePassXC", "Productivity"),
-    ("calibre", "com.calibre_ebook.calibre", "Productivity"),
-    ("gimp", "org.gimp.GIMP", "Graphics"),
-    ("inkscape", "org.inkscape.Inkscape", "Graphics"),
-    ("krita", "org.kde.krita", "Graphics"),
-    ("blender", "org.blender.Blender", "Graphics"),
-    ("darktable", "org.darktable.Darktable", "Graphics"),
-    ("vlc", "org.videolan.VLC", "Audio & video"),
-    ("obs-studio", "com.obsproject.Studio", "Audio & video"),
-    ("audacity", "org.audacityteam.Audacity", "Audio & video"),
-    ("kdePackages.kdenlive", "org.kde.kdenlive", "Audio & video"),
-    ("zed-editor", "dev.zed.Zed", "Development"),
-    ("godot", "org.godotengine.Godot", "Development"),
-    ("lutris", "net.lutris.Lutris", "Games"),
-    ("superTuxKart", "net.supertuxkart.SuperTuxKart", "Games"),
-    ("stellarium", "org.stellarium.Stellarium", "Education"),
-    ("wireshark", "org.wireshark.Wireshark", "Security"),
+/// Flathub apps whose descriptions and artwork nixpkgs packages share, by attribute.
+const ART: &[(&str, &str)] = &[
+    ("firefox", "org.mozilla.firefox"),
+    ("chromium", "org.chromium.Chromium"),
+    ("brave", "com.brave.Browser"),
+    ("vivaldi", "com.vivaldi.Vivaldi"),
+    ("thunderbird", "org.mozilla.Thunderbird"),
+    ("signal-desktop", "org.signal.Signal"),
+    ("telegram-desktop", "org.telegram.desktop"),
+    ("discord", "com.discordapp.Discord"),
+    ("transmission_4-gtk", "com.transmissionbt.Transmission"),
+    ("libreoffice-fresh", "org.libreoffice.LibreOffice"),
+    ("onlyoffice-desktopeditors", "org.onlyoffice.desktopeditors"),
+    ("keepassxc", "org.keepassxc.KeePassXC"),
+    ("calibre", "com.calibre_ebook.calibre"),
+    ("gimp", "org.gimp.GIMP"),
+    ("inkscape", "org.inkscape.Inkscape"),
+    ("krita", "org.kde.krita"),
+    ("blender", "org.blender.Blender"),
+    ("darktable", "org.darktable.Darktable"),
+    ("vlc", "org.videolan.VLC"),
+    ("obs-studio", "com.obsproject.Studio"),
+    ("audacity", "org.audacityteam.Audacity"),
+    ("ardour", "org.ardour.Ardour"),
+    ("kdePackages.kdenlive", "org.kde.kdenlive"),
+    ("shotcut", "org.shotcut.Shotcut"),
+    ("zed-editor", "dev.zed.Zed"),
+    ("vscode", "com.visualstudio.code"),
+    ("vscodium", "com.vscodium.codium"),
+    ("godot", "org.godotengine.Godot"),
+    ("lutris", "net.lutris.Lutris"),
+    ("heroic", "com.heroicgameslauncher.hgl"),
+    ("superTuxKart", "net.supertuxkart.SuperTuxKart"),
+    ("gnome-boxes", "org.gnome.Boxes"),
+    ("remmina", "org.remmina.Remmina"),
+    ("rustdesk-flutter", "com.rustdesk.RustDesk"),
+    ("virt-manager", "org.virt_manager.virt-manager"),
+    ("stellarium", "org.stellarium.Stellarium"),
+    ("wireshark", "org.wireshark.Wireshark"),
+];
+
+/// nixpkgs picks the catalog doesn't have: attribute and category.
+const PICKS: &[(&str, &str)] = &[
+    ("thunderbird", "Internet"),
+    ("transmission_4-gtk", "Internet"),
+    ("keepassxc", "Productivity"),
+    ("calibre", "Productivity"),
+    ("blender", "Graphics"),
+    ("darktable", "Graphics"),
+    ("vlc", "Audio & video"),
+    ("obs-studio", "Audio & video"),
+    ("godot", "Development"),
+    ("superTuxKart", "Games"),
+    ("stellarium", "Education"),
+    ("wireshark", "Security"),
 ];
 
 /// Whether Store runs on NixOS, where these sources take pacman's place.
 pub fn active() -> bool {
     Path::new("/etc/NIXOS").exists()
+}
+
+/// Store's category for a catalog category.
+fn category(id: &str) -> &'static str {
+    match id {
+        "browsers" | "chat" | "remote" | "nyx-communication" => "Internet",
+        "office" | "nyx-productivity" | "nyx-essentials" | "nyx-tools" => "Productivity",
+        "graphics" => "Graphics",
+        "video" | "audio" | "nyx-media" => "Audio & video",
+        "games" => "Games",
+        _ => "Development",
+    }
 }
 
 fn data_home() -> PathBuf {
@@ -101,7 +150,8 @@ fn store_version(path: &str) -> String {
         .unwrap_or_default()
 }
 
-/// nixpkgs attributes in the user's profile, with the element names `nix profile` uses.
+/// nixpkgs attributes in the user's profile (from an older Store), with the element
+/// names `nix profile` uses.
 fn profile() -> BTreeMap<String, (String, Installed)> {
     let Ok(text) = command("nix", &["profile", "list", "--json"]) else { return BTreeMap::new() };
     let v: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
@@ -125,10 +175,46 @@ fn flatpaks() -> BTreeMap<String, Installed> {
             let mut f = l.split('\t');
             let id = f.next()?.trim();
             (!id.is_empty()).then(|| {
-                (id.to_string(), Installed { name: id.into(), version: f.next().unwrap_or("").trim().into(), stamp: String::new() })
+                (
+                    id.to_string(),
+                    Installed { name: id.into(), version: f.next().unwrap_or("").trim().into(), stamp: String::new() },
+                )
             })
         })
         .collect()
+}
+
+/// The System Manager's settings (through `nyx-system`; empty when it can't be reached).
+fn system_settings() -> SystemSettings {
+    command("nyx-system", &["settings"]).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
+}
+
+fn software() -> Result<Software> {
+    Software::load()
+}
+
+/// What an item installs and needs, for its details.
+fn requirements(item: &Item) -> String {
+    let mut lines = Vec::new();
+    if !item.nyx.is_empty() {
+        lines.push("A Nyx app, installed for everyone.".to_string());
+    }
+    if !item.packages.is_empty() {
+        lines.push(format!("Installs for everyone (nixpkgs): {}.", item.packages.join(", ")));
+    }
+    if let Some(f) = &item.flatpak {
+        lines.push(format!("Installs for you from Flathub ({f})."));
+    }
+    if !item.services.is_empty() {
+        lines.push(format!("Turns on the system service {}.", item.services.join(", ")));
+    }
+    if !item.groups.is_empty() {
+        lines.push(format!("Adds you to the {} group; you're asked first.", item.groups.join(", ")));
+    }
+    if let Some(note) = &item.note {
+        lines.push(note.clone());
+    }
+    format!("{}\n\n{}", item.summary, lines.join("\n"))
 }
 
 pub fn load(cache: &Path, refresh: bool) -> Result<Catalog> {
@@ -146,9 +232,30 @@ pub fn load(cache: &Path, refresh: bool) -> Result<Catalog> {
         let _ = std::os::unix::fs::symlink(appstream_dir().join("icons"), &link);
     }
     let by_id: BTreeMap<String, App> = flathub.iter().map(|a| (a.package.clone(), a.clone())).collect();
+    let art = |attr: &str| ART.iter().find(|(a, _)| *a == attr).and_then(|(_, id)| by_id.get(*id));
+
+    let settings = system_settings();
+    let have = Have::probe(settings.clone());
     let mut apps = Vec::new();
-    for &(attr, id, category) in PICKS {
-        let mut a = by_id.get(id).cloned().unwrap_or_else(|| App { name: attr.into(), desktop: true, ..Default::default() });
+    let mut installed = BTreeMap::new();
+    for item in software()?.items.into_iter().filter(|i| i.tier != Tier::Base) {
+        let looks = item.flatpak.as_deref().and_then(|f| by_id.get(f)).or_else(|| item.packages.first().and_then(|p| art(p)));
+        let mut a = looks.cloned().unwrap_or_else(|| App { desktop: true, ..Default::default() });
+        a.package = item.id.clone();
+        a.name = item.name.clone();
+        a.summary = item.summary.clone();
+        a.description = requirements(&item);
+        a.category = category(&item.category).into();
+        a.source = NYXOS.into();
+        a.license = if item.unfree { "Not free: you accept its license when installing".into() } else { a.license };
+        a.popular = item.tier == Tier::Welcome && looks.is_some();
+        if have.has(&item) {
+            installed.insert(item.id.clone(), Installed { name: item.id.clone(), version: String::new(), stamp: String::new() });
+        }
+        apps.push(a);
+    }
+    for &(attr, category) in PICKS {
+        let mut a = art(attr).cloned().unwrap_or_else(|| App { name: attr.into(), desktop: true, ..Default::default() });
         a.package = attr.into();
         a.source = NIXPKGS.into();
         a.category = category.into();
@@ -157,11 +264,13 @@ pub fn load(cache: &Path, refresh: bool) -> Result<Catalog> {
     }
     for a in &mut flathub {
         a.source = FLATHUB.into();
-        a.popular = PICKS.iter().any(|(_, id, _)| *id == a.package);
+        a.popular = ART.iter().any(|(_, id)| *id == a.package);
     }
     apps.extend(flathub);
 
-    let mut installed = BTreeMap::new();
+    for attr in &settings.packages {
+        installed.insert(attr.clone(), Installed { name: attr.clone(), version: String::new(), stamp: String::new() });
+    }
     for (attr, (_, i)) in profile() {
         installed.insert(attr, i);
     }
@@ -185,7 +294,7 @@ pub fn load(cache: &Path, refresh: bool) -> Result<Catalog> {
         sources: BTreeMap::new(),
         candidates: BTreeMap::new(),
         // The source menu lists these.
-        repositories: [FLATHUB, NIXPKGS]
+        repositories: [NYXOS, NIXPKGS, FLATHUB]
             .map(|name| crate::repositories::Repository { name: name.into(), servers: Vec::new(), enabled: true })
             .into(),
         updates,
@@ -193,7 +302,7 @@ pub fn load(cache: &Path, refresh: bool) -> Result<Catalog> {
     })
 }
 
-/// nixpkgs packages matching `query` (`nix search`), for anything not in the picks.
+/// nixpkgs packages matching `query` (`nix search`), for anything not in the catalog.
 pub fn search(query: &str) -> Result<Vec<App>> {
     let words: Vec<&str> = query.split_whitespace().filter(|w| w.len() > 1).take(4).collect();
     ensure!(!words.is_empty(), "Type a longer search");
@@ -220,49 +329,166 @@ pub fn search(query: &str) -> Result<Vec<App>> {
     Ok(apps)
 }
 
-fn plan(request: &Request) -> Result<Plan> {
-    let profile = profile();
-    let changes = match request {
-        Request::Install { source, packages } => {
-            ensure!(matches!(source.as_str(), FLATHUB | NIXPKGS), "Install from Flathub or nixpkgs");
-            ensure!(!packages.is_empty() && packages.iter().all(|p| valid_name(p)), "Invalid package selection");
-            packages
-                .iter()
-                .map(|p| Change { name: p.clone(), old: None, new: Some(String::new()), source: source.clone(), bytes: 0 })
+/// Whether nixpkgs marks `attr` unfree (the system's nixpkgs, through the registry).
+fn unfree(attr: &str) -> bool {
+    command("nix", &["eval", "--json", &format!("{NIXPKGS}#{attr}.meta.unfree")]).is_ok_and(|t| t.trim() == "true")
+}
+
+/// The system's generations: how many, the current one and the one before it.
+pub fn generations() -> (usize, Option<u32>, Option<u32>) {
+    let mut numbers: Vec<u32> = fs::read_dir(PROFILES)
+        .map(|d| {
+            d.flatten()
+                .filter_map(|e| e.file_name().to_string_lossy().strip_prefix("system-")?.strip_suffix("-link")?.parse().ok())
                 .collect()
+        })
+        .unwrap_or_default();
+    numbers.sort();
+    let current: Option<u32> = fs::read_link(Path::new(PROFILES).join("system"))
+        .ok()
+        .and_then(|l| l.to_string_lossy().strip_prefix("system-")?.strip_suffix("-link")?.parse().ok());
+    let previous = current.and_then(|c| numbers.iter().rev().find(|n| **n < c).copied());
+    (numbers.len(), current, previous)
+}
+
+fn user() -> String {
+    std::env::var("USER").unwrap_or_default()
+}
+
+fn change(name: &str, new: &str, source: &str) -> Change {
+    Change { name: name.into(), old: None, new: Some(new.into()), source: source.into(), bytes: 0 }
+}
+
+/// What a request takes: the system's changes, Flathub's, the user's old profile's, and
+/// what has to be agreed to. Worked out the same way for the review and for applying.
+struct Work {
+    system: Vec<SystemChange>,
+    flatpak_install: Vec<String>,
+    flatpak_remove: Vec<String>,
+    profile_remove: Vec<String>,
+    update: bool,
+    rollback: bool,
+    plan: Plan,
+}
+
+fn work(request: &Request) -> Result<Work> {
+    let mut w = Work {
+        system: Vec::new(),
+        flatpak_install: Vec::new(),
+        flatpak_remove: Vec::new(),
+        profile_remove: Vec::new(),
+        update: false,
+        rollback: false,
+        plan: Plan::default(),
+    };
+    let settings = system_settings();
+    match request {
+        Request::Install { source, packages } => {
+            ensure!(!packages.is_empty() && packages.iter().all(|p| valid_name(p)), "Invalid package selection");
+            match source.as_str() {
+                NYXOS => {
+                    let sw = software()?;
+                    let ids: BTreeSet<String> = packages.iter().cloned().collect();
+                    let have = Have::probe(settings);
+                    let p = sw.plan(&ids, &user(), &have)?;
+                    for id in &ids {
+                        if let Some(i) = sw.item(id).filter(|i| !have.has(i)) {
+                            let how = if i.flatpak.is_some() { "for you, from Flathub" } else { "for everyone" };
+                            w.plan.changes.push(change(&i.name, how, NYXOS));
+                        }
+                    }
+                    w.plan.notes = p.consent.iter().map(|c| c.describe()).collect();
+                    w.system = p.changes;
+                    w.flatpak_install = p.flatpaks;
+                }
+                NIXPKGS => {
+                    let unfree: Vec<String> = packages.iter().filter(|p| unfree(p)).cloned().collect();
+                    for p in packages {
+                        w.plan.changes.push(change(p, "for everyone", NIXPKGS));
+                    }
+                    for u in &unfree {
+                        w.plan.notes.push(format!("{u} has a license that isn't free; installing it accepts that license"));
+                    }
+                    w.system.push(SystemChange::AddPackages { packages: packages.clone(), unfree });
+                }
+                FLATHUB => {
+                    for p in packages {
+                        w.plan.changes.push(change(p, "for you", FLATHUB));
+                    }
+                    w.flatpak_install = packages.clone();
+                }
+                _ => bail!("Install from the NyxOS catalog, nixpkgs or Flathub"),
+            }
         }
         Request::Remove { package } => {
             ensure!(valid_name(package), "Invalid package name");
-            let source = if profile.contains_key(package) { NIXPKGS } else { FLATHUB };
-            vec![Change { name: package.clone(), old: Some(String::new()), new: None, source: source.into(), bytes: 0 }]
+            let sw = software()?;
+            let removed = Change { name: package.clone(), old: Some(String::new()), new: None, source: String::new(), bytes: 0 };
+            if let Some(item) = sw.item(package) {
+                ensure!(item.tier != Tier::Base, "{} is part of NyxOS", item.name);
+                let p = sw.removal(&BTreeSet::from([package.clone()]), &Have::probe(settings))?;
+                w.system = p.changes;
+                w.flatpak_remove = p.flatpaks;
+                w.plan.changes.push(Change { name: item.name.clone(), source: NYXOS.into(), ..removed });
+            } else if settings.packages.contains(package) {
+                w.system.push(SystemChange::RemovePackages { packages: vec![package.clone()] });
+                w.plan.changes.push(Change { source: NIXPKGS.into(), ..removed });
+            } else if let Some((element, _)) = profile().get(package) {
+                w.profile_remove.push(element.clone());
+                w.plan.changes.push(Change { source: "your nix profile".into(), ..removed });
+            } else {
+                w.flatpak_remove.push(package.clone());
+                w.plan.changes.push(Change { source: FLATHUB.into(), ..removed });
+            }
         }
         Request::Update => {
-            let mut c: Vec<Change> = profile
-                .keys()
-                .map(|a| Change { name: a.clone(), old: None, new: None, source: NIXPKGS.into(), bytes: 0 })
-                .collect();
-            c.extend(
-                flatpaks()
-                    .into_keys()
-                    .map(|id| Change { name: id, old: None, new: None, source: FLATHUB.into(), bytes: 0 }),
-            );
-            c
+            w.update = true;
+            w.plan.changes.push(change(
+                "NyxOS",
+                "latest",
+                "the system: NyxOS, its Nyx apps and everything installed for everyone",
+            ));
+            for id in flatpaks().into_keys() {
+                w.plan.changes.push(change(&id, "latest", FLATHUB));
+            }
+            for attr in profile().into_keys() {
+                w.plan.changes.push(change(&attr, "latest", "your nix profile"));
+            }
         }
-        _ => bail!("On NixOS, Store installs from Flathub and nixpkgs only"),
-    };
-    Ok(Plan { changes, snapshot: String::new() })
+        Request::Rollback => {
+            let (_, current, previous) = generations();
+            let previous = previous.context("There's no earlier generation to go back to")?;
+            w.rollback = true;
+            w.plan.changes.push(Change {
+                name: "System".into(),
+                old: current.map(|c| format!("generation {c}")),
+                new: Some(format!("generation {previous}")),
+                source: "NyxOS".into(),
+                bytes: 0,
+            });
+            w.plan.notes.push(
+                "Software installed for everyone since then is removed again, and the system settings go back with it. Your files stay as they are."
+                    .into(),
+            );
+        }
+        _ => bail!("On NyxOS, Store installs from the NyxOS catalog, nixpkgs and Flathub"),
+    }
+    Ok(w)
 }
 
-/// Run one step, passing its progress lines on as status.
-fn step(send: &async_channel::Sender<Event>, program: &str, args: &[&str]) -> Result<()> {
+/// Run one step, passing its progress lines on as status (and `input` to its stdin).
+fn step(send: &async_channel::Sender<Event>, program: &str, args: &[&str], input: Option<&str>) -> Result<()> {
     let _ = send.send_blocking(Event::Status { message: format!("{program} {}", args.join(" ")) });
     let mut child = Command::new(program)
         .args(args)
-        .stdin(Stdio::null())
+        .stdin(if input.is_some() { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .with_context(|| format!("{program} is missing"))?;
+    if let (Some(text), Some(mut stdin)) = (input, child.stdin.take()) {
+        stdin.write_all(text.as_bytes())?;
+    }
     let stdout = child.stdout.take().unwrap();
     let out_send = send.clone();
     let out = std::thread::spawn(move || {
@@ -278,54 +504,56 @@ fn step(send: &async_channel::Sender<Event>, program: &str, args: &[&str]) -> Re
         }
     }
     let _ = out.join();
-    ensure!(child.wait()?.success(), "{}", if last.is_empty() { format!("{program} failed") } else { last });
+    ensure!(
+        child.wait()?.success(),
+        "{}",
+        if last.is_empty() { format!("{program} failed") } else { last.trim_start_matches("nyx-system: ").to_string() }
+    );
     Ok(())
 }
 
-fn apply(request: &Request, send: &async_channel::Sender<Event>) -> Result<String> {
-    match request {
-        Request::Install { source, packages } => {
-            for p in packages {
-                if source == NIXPKGS {
-                    step(send, "nix", &["profile", "add", &format!("{NIXPKGS}#{p}")])?;
-                } else {
-                    step(send, "flatpak", &["install", "--user", "--noninteractive", "-y", FLATHUB, p])?;
-                }
-            }
-            Ok("Installed".into())
-        }
-        Request::Remove { package } => {
-            match profile().get(package) {
-                Some((element, _)) => step(send, "nix", &["profile", "remove", element])?,
-                None => step(send, "flatpak", &["uninstall", "--user", "--noninteractive", "-y", package])?,
-            }
-            Ok("Removed".into())
-        }
-        Request::Update => {
-            if !profile().is_empty() {
-                step(send, "nix", &["profile", "upgrade", "--all"])?;
-            }
-            step(send, "flatpak", &["update", "--user", "--noninteractive", "-y"])?;
-            Ok("Everything is up to date".into())
-        }
-        _ => bail!("On NixOS, Store installs from Flathub and nixpkgs only"),
+fn apply(w: &Work, send: &async_channel::Sender<Event>) -> Result<String> {
+    if w.rollback {
+        step(send, "nyx-system", &["rollback"], None)?;
+        return Ok("Back to the previous generation".into());
     }
+    if w.update {
+        step(send, "nyx-system", &["update"], None)?;
+        step(send, "flatpak", &["update", "--user", "--noninteractive", "-y"], None)?;
+        if !profile().is_empty() {
+            step(send, "nix", &["profile", "upgrade", "--all"], None)?;
+        }
+        return Ok("Everything is up to date".into());
+    }
+    if !w.system.is_empty() {
+        step(send, "nyx-system", &["apply", "-"], Some(&serde_json::to_string(&w.system)?))?;
+    }
+    let line = |l: &str| {
+        let _ = send.send_blocking(Event::Status { message: l.to_string() });
+    };
+    nyx_catalog::flatpak(&w.flatpak_install, true, line)?;
+    nyx_catalog::flatpak(&w.flatpak_remove, false, line)?;
+    for element in &w.profile_remove {
+        step(send, "nix", &["profile", "remove", element], None)?;
+    }
+    Ok(if w.plan.changes.iter().all(|c| c.new.is_none()) { "Removed".into() } else { "Installed".into() })
 }
 
-/// The window's transaction: a plan to review, then the user's own nix or flatpak.
+/// The window's transaction: a plan to review, then the System Manager, flatpak or nix.
 pub fn start(request: Request, send: async_channel::Sender<Event>, confirmation: std::sync::mpsc::Receiver<Option<Plan>>) {
     let result = (|| -> Result<Option<String>> {
-        let plan = plan(&request)?;
-        let _ = send.send_blocking(Event::Plan { plan });
+        let w = work(&request)?;
+        ensure!(!w.plan.changes.is_empty(), "That's already installed");
+        let _ = send.send_blocking(Event::Plan { plan: w.plan.clone() });
         match confirmation.recv() {
-            Ok(Some(_)) => apply(&request, &send).map(Some),
+            Ok(Some(_)) => apply(&w, &send).map(Some),
             _ => Ok(None),
         }
     })();
     let _ = send.send_blocking(match result {
         Ok(Some(message)) => Event::Done { message },
         Ok(None) => return,
-        Err(e) => Event::Error { message: e.to_string() },
+        Err(e) => Event::Error { message: format!("{e:#}") },
     });
 }
 
@@ -349,5 +577,17 @@ mod tests {
         let apps = catalog::parse(xml).unwrap();
         assert_eq!(apps[0].package, "org.gimp.GIMP");
         assert_eq!(apps[0].icon, "@cache:flathub/128x128/org.gimp.GIMP.png");
+    }
+
+    #[test]
+    fn the_catalog_maps_onto_stores_categories() {
+        let sw = Software::builtin().unwrap();
+        for item in &sw.items {
+            assert!(crate::catalog::CATEGORIES.iter().any(|(c, _)| *c == category(&item.category)), "{}", item.id);
+            assert!(valid_name(&item.id), "{} isn't a name Store's requests take", item.id);
+        }
+        for (attr, _) in PICKS {
+            assert!(!sw.items.iter().any(|i| i.packages.iter().any(|p| p == attr)), "{attr} is in the catalog too");
+        }
     }
 }

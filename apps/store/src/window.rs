@@ -700,7 +700,7 @@ fn render() {
             "{} apps · {} installed · {}",
             c.apps.iter().filter(|a| a.desktop).map(|a| &a.package).collect::<BTreeSet<_>>().len(),
             c.apps.iter().filter(|a| a.desktop && a.installed.is_some()).map(|a| &a.package).collect::<BTreeSet<_>>().len(),
-            if nyx_store::nix::active() { "Flathub and nixpkgs" } else { "Omarchy first" }
+            if nyx_store::nix::active() { "NyxOS catalog, nixpkgs and Flathub" } else { "Omarchy first" }
         ));
     }
 }
@@ -839,7 +839,7 @@ fn details(app: App) {
     summary.set_wrap(true);
     summary.set_xalign(0.0);
     info.append(&summary);
-    info.append(&widgets::label(&format!("{} · {}", app.source, app.version), "source-tag"));
+    info.append(&widgets::label(&format!("{} · {}", source_name(&app.source), app.version), "source-tag"));
     head.append(&info);
     content.append(&head);
     let description = widgets::label(if app.description.is_empty() { &app.summary } else { &app.description }, "");
@@ -928,17 +928,19 @@ fn details(app: App) {
     dialog.present();
 }
 
+/// A source as people read it.
+fn source_name(source: &str) -> &str {
+    match source {
+        "nyxos" => "NyxOS catalog",
+        "nixpkgs" => "nixpkgs",
+        "flathub" => "Flathub",
+        other => other,
+    }
+}
+
 fn render_updates(c: &Catalog) {
     if nyx_store::nix::active() {
-        heading(
-            "Updates",
-            "Updates your Flathub apps and the nixpkgs packages in your profile. The system updates with NyxOS.",
-        );
-        for change in &c.updates {
-            text(&format!("{} {}", change.name, change.new.as_deref().unwrap_or("")));
-        }
-        let update = button("Update my apps", || start_request(Request::Update));
-        ui().body.append(&update);
+        render_nixos_updates(c);
         return;
     }
     heading(
@@ -993,6 +995,38 @@ fn render_updates(c: &Catalog) {
         );
         u.body.append(&row.0);
     }
+}
+
+/// NyxOS: the system updates as one (NyxOS, its Nyx apps and everything installed for
+/// everyone), Flathub's apps with it, and a system change can be undone a generation.
+fn render_nixos_updates(c: &Catalog) {
+    heading(
+        "Updates",
+        "NyxOS, its Nyx apps and the software installed for everyone update together into a new system generation, switched to only when it builds. Your Flathub apps update with them.",
+    );
+    let update = button("Update everything", || start_request(Request::Update));
+    update.add_css_class("suggested-action");
+    update.set_halign(gtk::Align::Start);
+    update.set_margin_top(12);
+    update.set_sensitive(!ui().busy.get());
+    ui().body.append(&update);
+    if c.updates.is_empty() {
+        text("No Flathub updates in the cached catalog. Refresh to check again.");
+    } else {
+        for change in &c.updates {
+            let row = widgets::row(&change.name, &format!("{} · Flathub", change.new.as_deref().unwrap_or("")), None);
+            ui().body.append(&row);
+        }
+    }
+    heading("System generations", "Every system change makes a new generation. Going back undoes the last one, software and settings with it; your files stay.");
+    let (count, current, previous) = nyx_store::nix::generations();
+    let detail = match current {
+        Some(n) => format!("This is generation {n}; {count} are kept. Older ones are also in the boot menu."),
+        None => "The current generation isn't known.".into(),
+    };
+    let (row, back) = widgets::button_row("Go back a generation", &detail, "Go Back", |_| start_request(Request::Rollback));
+    back.set_sensitive(previous.is_some() && !ui().busy.get());
+    ui().body.append(&row);
 }
 
 fn check_aur_updates() {
@@ -1358,11 +1392,18 @@ fn transaction_review(plan: Plan) {
     dialog.set_default_height(600);
     let bytes: i64 = plan.changes.iter().map(|c| c.bytes).sum();
     let note = widgets::label(
-        &format!(
-            "{} package changes · {:.1} MiB package data\nEvery update keeps its recorded source. Required system updates are included.",
-            plan.changes.len(),
-            bytes as f64 / 1048576.0
-        ),
+        &if nyx_store::nix::active() {
+            format!(
+                "{} changes. Software for everyone is built into a new system generation first, and only switched to when the build works. Applying asks for an administrator's password.",
+                plan.changes.len()
+            )
+        } else {
+            format!(
+                "{} package changes · {:.1} MiB package data\nEvery update keeps its recorded source. Required system updates are included.",
+                plan.changes.len(),
+                bytes as f64 / 1048576.0
+            )
+        },
         "dim",
     );
     note.set_wrap(true);
@@ -1371,12 +1412,27 @@ fn transaction_review(plan: Plan) {
     for c in &plan.changes {
         list.append(&widgets::row(
             &c.name,
-            &format!("{} → {} · {}", c.old.as_deref().unwrap_or("Not installed"), c.new.as_deref().unwrap_or("Remove"), c.source),
+            &format!(
+                "{} → {} · {}",
+                c.old.as_deref().filter(|o| !o.is_empty()).unwrap_or(if c.old.is_some() { "Installed" } else { "Not installed" }),
+                c.new.as_deref().unwrap_or("Remove"),
+                source_name(&c.source)
+            ),
             None,
         ));
     }
     let scroll = gtk::ScrolledWindow::builder().child(&list).vexpand(true).hscrollbar_policy(gtk::PolicyType::Never).build();
     card.append(&scroll);
+    // What has to be agreed to (unfree licenses, services, groups): Apply waits for it.
+    let agree = (!plan.notes.is_empty()).then(|| {
+        for n in &plan.notes {
+            card.append(&widgets::banner(&glib::markup_escape_text(n), true));
+        }
+        let check = gtk::CheckButton::with_label("I agree to the above");
+        check.set_halign(gtk::Align::Start);
+        card.append(&check);
+        check
+    });
     let actions = widgets::hbox(8);
     actions.set_halign(gtk::Align::End);
     let d = dialog.clone();
@@ -1394,6 +1450,11 @@ fn transaction_review(plan: Plan) {
         d.close();
     });
     install.add_css_class("suggested-action");
+    if let Some(check) = &agree {
+        install.set_sensitive(false);
+        let i = install.clone();
+        check.connect_toggled(move |c| i.set_sensitive(c.is_active()));
+    }
     actions.append(&install);
     card.append(&actions);
     dialog.connect_close_request(move |_| {
