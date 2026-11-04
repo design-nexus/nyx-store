@@ -3,6 +3,7 @@ pub mod aur;
 pub mod blackarch;
 pub mod catalog;
 pub mod model;
+pub mod nix;
 pub mod packages;
 pub mod provenance;
 pub mod repositories;

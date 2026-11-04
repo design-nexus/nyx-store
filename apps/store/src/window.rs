@@ -126,7 +126,8 @@ fn build(app: &gtk::Application) {
     let list = widgets::vbox(0);
     list.set_hexpand(false);
     let mut nav_buttons = Vec::new();
-    for &(id, title, icon) in PAGES {
+    // On NixOS the sources are Flathub and nixpkgs; there are no repositories to manage.
+    for &(id, title, icon) in PAGES.iter().filter(|p| !(nyx_store::nix::active() && p.0 == "repositories")) {
         let button = gtk::Button::new();
         button.add_css_class("nav-item");
         button.set_tooltip_text(Some(title));
@@ -290,7 +291,8 @@ fn build(app: &gtk::Application) {
                 }
                 let (tx, rx) = async_channel::bounded(1);
                 std::thread::spawn(move || {
-                    let _ = tx.send_blocking(aur::search(&query).map_err(|e| e.to_string()));
+                    let search = if nyx_store::nix::active() { nyx_store::nix::search } else { aur::search };
+                    let _ = tx.send_blocking(search(&query).map_err(|e| e.to_string()));
                 });
                 glib::spawn_future_local(async move {
                     if let Ok(result) = rx.recv().await
@@ -553,7 +555,9 @@ fn update_sources() {
             }
         }
     }
-    names.push("AUR".into());
+    if !nyx_store::nix::active() {
+        names.push("AUR".into());
+    }
     let position = selected.and_then(|name| names.iter().position(|n| n == &name || (n == "AUR" && name == "aur"))).unwrap_or(0);
     let _notifications = u.source.freeze_notify();
     u.source.set_model(Some(&gtk::StringList::new(&names.iter().map(String::as_str).collect::<Vec<_>>())));
@@ -1558,7 +1562,12 @@ fn settings() {
             wrapper.append(&group);
             page.body.append(&wrapper);
             let p = prefs::get();
-            let (row, _) = widgets::switch_row("Include AUR results", "Search community packages as well as official repositories.", p.include_aur, |on| {
+            let (title, detail) = if nyx_store::nix::active() {
+                ("Search all of nixpkgs", "Find packages beyond the apps in the catalog.")
+            } else {
+                ("Include AUR results", "Search community packages as well as official repositories.")
+            };
+            let (row, _) = widgets::switch_row(title, detail, p.include_aur, |on| {
                 prefs::update(|p| p.include_aur = on);
                 ui().search_generation.set(ui().search_generation.get() + 1);
                 ui().aur.borrow_mut().clear();

@@ -83,7 +83,16 @@ pub fn parse(xml: &str) -> Result<Vec<App>> {
                 .trim()
                 .to_string()
         };
-        let package = text("pkgname");
+        // Distribution catalogs name the package; Flathub's names the app (its flatpak ref).
+        let package = Some(text("pkgname")).filter(|p| !p.is_empty()).unwrap_or_else(|| {
+            c.children()
+                .find(|n| n.has_tag_name("bundle") && n.attribute("type") == Some("flatpak"))
+                .and_then(|n| n.text())
+                .and_then(|r| r.trim().strip_prefix("app/"))
+                .and_then(|r| r.split('/').next())
+                .unwrap_or("")
+                .to_string()
+        });
         if !crate::model::valid_name(&package) {
             continue;
         }
@@ -263,6 +272,9 @@ pub struct Catalog {
 }
 
 pub fn load(cache: &Path, refresh: bool) -> Result<Catalog> {
+    if crate::nix::active() {
+        return crate::nix::load(cache, refresh);
+    }
     fs::create_dir_all(cache)?;
     let h = packages::handle(cache, false, refresh)?;
     let installed = packages::installed(&h);

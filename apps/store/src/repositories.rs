@@ -14,7 +14,7 @@ pub struct Repository {
 }
 
 pub fn official(name: &str) -> bool {
-    matches!(name, "omarchy" | "core" | "extra" | "multilib")
+    matches!(name, "omarchy" | "core" | "extra" | "multilib" | crate::nix::FLATHUB | crate::nix::NIXPKGS)
 }
 
 pub fn validate(repo: &Repository) -> Result<()> {
