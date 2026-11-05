@@ -69,13 +69,15 @@ struct Ui {
     confirmation: RefCell<Option<mpsc::Sender<Option<Plan>>>>,
     pending_recipe: RefCell<Option<Recipe>>,
     queue: RefCell<VecDeque<Request>>,
+    /// A launcher's desktop id from `--remove`, until the catalog has loaded.
+    pending_remove: RefCell<Option<String>>,
 }
 thread_local! { static UI: RefCell<Option<Rc<Ui>>> = const { RefCell::new(None) }; }
 fn ui() -> Rc<Ui> {
     UI.with(|u| u.borrow().as_ref().unwrap().clone())
 }
 
-pub fn present(app: &gtk::Application, section: Option<&str>, query: Option<&str>) {
+pub fn present(app: &gtk::Application, section: Option<&str>, query: Option<&str>, remove: Option<&str>) {
     if UI.with(|u| u.borrow().is_none()) {
         build(app);
         let cache = nyx_core::paths::cache_dir().join("catalog-refreshed");
@@ -102,6 +104,47 @@ pub fn present(app: &gtk::Application, section: Option<&str>, query: Option<&str
         navigate("search");
     }
     u.window.present();
+    if let Some(id) = remove {
+        *u.pending_remove.borrow_mut() = Some(id.to_string());
+        navigate("installed");
+        if u.catalog.borrow().is_some() && !u.loading.get() {
+            offer_removal();
+        }
+    }
+}
+
+/// `--remove`: the details of the installed app the launcher belongs to, whose Remove
+/// goes through the usual review.
+fn offer_removal() {
+    let u = ui();
+    let Some(id) = u.pending_remove.borrow_mut().take() else { return };
+    let owner = launcher_owner(&id);
+    let found = u.catalog.borrow().as_ref().and_then(|c| nyx_store::model::installed_app(&c.apps, &id, owner.as_deref()).cloned());
+    match found {
+        Some(app) => details(app),
+        None => notice("This app wasn't installed through a source Store manages."),
+    }
+}
+
+/// The package that owns a launcher's file: pacman's owner, or the Nix store path's name.
+/// A copy in the user's own folder (an edited launcher) belongs to no package, so each
+/// copy is tried.
+fn launcher_owner(id: &str) -> Option<String> {
+    let file = format!("applications/{}.desktop", id.trim_end_matches(".desktop"));
+    let nix = nyx_store::nix::active();
+    std::iter::once(glib::user_data_dir())
+        .chain(glib::system_data_dirs())
+        .map(|d| d.join(&file))
+        .filter(|p| p.exists())
+        .find_map(|path| {
+            if nix {
+                let real = std::fs::canonicalize(&path).ok()?;
+                return nyx_store::model::nix_store_name(&real.to_string_lossy());
+            }
+            let out = std::process::Command::new("/usr/bin/pacman").arg("-Qqo").arg(&path).output().ok()?;
+            let name = String::from_utf8_lossy(&out.stdout).lines().next()?.trim().to_string();
+            (out.status.success() && !name.is_empty()).then_some(name)
+        })
 }
 
 /// The search's width in characters, in a full window and a narrow one.
@@ -262,6 +305,7 @@ fn build(app: &gtk::Application) {
         confirmation: RefCell::new(None),
         pending_recipe: RefCell::new(None),
         queue: RefCell::new(VecDeque::new()),
+        pending_remove: RefCell::new(None),
     });
     UI.with(|v| *v.borrow_mut() = Some(u.clone()));
     source.connect_selected_notify(|_| {
@@ -500,6 +544,8 @@ fn refresh(network: bool) {
                     render();
                     if bootstrap {
                         refresh(true);
+                    } else {
+                        offer_removal();
                     }
                 }
                 Err(e) => {

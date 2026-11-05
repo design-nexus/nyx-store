@@ -7,6 +7,7 @@ system updates. Uses the shared Nyx theme, settings card and keyboard convention
 ```sh
 curl -fsSL https://raw.githubusercontent.com/design-nexus/nyx-store/main/install.sh | bash
 nyx-store
+nyx-store --remove firefox    # the installed app a launcher belongs to, to remove it
 ```
 
 The installer installs the UI to `~/.local` and asks through sudo to install the

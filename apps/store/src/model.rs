@@ -98,3 +98,62 @@ pub fn protected(name: &str) -> bool {
                 | "nyx-store"
         )
 }
+
+/// The installed app a launcher (`firefox` or `firefox.desktop`) belongs to: by its
+/// desktop id, by package (Flatpak ids are both), or by `owner`, the package that owns
+/// the launcher's file.
+pub fn installed_app<'a>(apps: &'a [App], desktop_id: &str, owner: Option<&str>) -> Option<&'a App> {
+    let stem = desktop_id.trim_end_matches(".desktop");
+    let installed = || apps.iter().filter(|a| a.installed.is_some());
+    installed()
+        .find(|a| !a.desktop_id.is_empty() && a.desktop_id.trim_end_matches(".desktop") == stem)
+        .or_else(|| installed().find(|a| a.package == stem))
+        .or_else(|| owner.and_then(|o| installed().find(|a| a.package == o)))
+}
+
+/// The package name in a Nix store path (`/nix/store/HASH-firefox-128.0/…` is
+/// `firefox`): the name before the first part that starts with a digit.
+pub fn nix_store_name(path: &str) -> Option<String> {
+    let entry = path.strip_prefix("/nix/store/")?.split('/').next()?;
+    let (_, name) = entry.split_once('-')?;
+    let parts: Vec<&str> = name.split('-').take_while(|p| !p.starts_with(|c: char| c.is_ascii_digit())).collect();
+    (!parts.is_empty()).then(|| parts.join("-"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn app(package: &str, desktop_id: &str, installed: bool) -> App {
+        App {
+            package: package.into(),
+            desktop_id: desktop_id.into(),
+            installed: installed.then(|| "1".into()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn finds_the_app_a_launcher_belongs_to() {
+        let apps = [
+            app("gimp", "gimp.desktop", false),
+            app("gimp", "gimp.desktop", true),
+            app("org.gnome.Maps", "", true),
+            app("signal-desktop", "", true),
+        ];
+        assert_eq!(installed_app(&apps, "gimp", None).map(|a| a.installed.is_some()), Some(true));
+        assert_eq!(installed_app(&apps, "org.gnome.Maps.desktop", None).map(|a| a.package.as_str()), Some("org.gnome.Maps"));
+        assert_eq!(installed_app(&apps, "signal", Some("signal-desktop")).map(|a| a.package.as_str()), Some("signal-desktop"));
+        assert!(installed_app(&apps, "webapp-hey", None).is_none());
+    }
+
+    #[test]
+    fn nix_store_names() {
+        assert_eq!(
+            nix_store_name("/nix/store/abc123-firefox-128.0/share/applications/firefox.desktop").as_deref(),
+            Some("firefox")
+        );
+        assert_eq!(nix_store_name("/nix/store/abc-signal-desktop-7.1.0/x").as_deref(), Some("signal-desktop"));
+        assert_eq!(nix_store_name("/usr/share/applications/x.desktop"), None);
+    }
+}

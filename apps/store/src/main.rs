@@ -7,7 +7,10 @@ use gtk::{gio, glib};
 fn main() -> glib::ExitCode {
     nyx_core::app::init(nyx_core::app::App { slug: "nyx-store", name: "Store" });
     if std::env::args().any(|a| a == "--help") {
-        println!("Usage: nyx-store [--section home|categories|installed|updates|repositories] [--search TEXT]");
+        println!(
+            "Usage: nyx-store [--section home|categories|installed|updates|repositories] [--search TEXT] [--remove DESKTOP-ID]\n\
+             \n  --remove DESKTOP-ID  show the installed app a launcher belongs to, to remove it"
+        );
         return glib::ExitCode::SUCCESS;
     }
     if std::env::args().any(|a| a == "--blackarch-check") {
@@ -108,7 +111,7 @@ fn main() -> glib::ExitCode {
     app.connect_command_line(|app, cli| {
         let args: Vec<_> = cli.arguments().iter().map(|a| a.to_string_lossy().to_string()).collect();
         let value = |key| args.iter().position(|a| a == key).and_then(|i| args.get(i + 1)).map(String::as_str);
-        window::present(app, value("--section"), value("--search"));
+        window::present(app, value("--section"), value("--search"), value("--remove"));
         glib::ExitCode::SUCCESS
     });
     app.connect_shutdown(|_| prefs::flush());
