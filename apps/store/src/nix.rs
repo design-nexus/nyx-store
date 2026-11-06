@@ -205,6 +205,9 @@ fn requirements(item: &Item) -> String {
     if let Some(f) = &item.flatpak {
         lines.push(format!("Installs for you from Flathub ({f})."));
     }
+    if let Some(f) = &item.profile {
+        lines.push(format!("Installs for you into your Nix profile, from {f}."));
+    }
     if !item.services.is_empty() {
         lines.push(format!("Turns on the system service {}.", item.services.join(", ")));
     }
@@ -366,6 +369,9 @@ struct Work {
     flatpak_install: Vec<String>,
     flatpak_remove: Vec<String>,
     profile_remove: Vec<String>,
+    /// Catalog flakes for the user's Nix profile.
+    flake_install: Vec<String>,
+    flake_remove: Vec<String>,
     update: bool,
     rollback: bool,
     plan: Plan,
@@ -377,6 +383,8 @@ fn work(request: &Request) -> Result<Work> {
         flatpak_install: Vec::new(),
         flatpak_remove: Vec::new(),
         profile_remove: Vec::new(),
+        flake_install: Vec::new(),
+        flake_remove: Vec::new(),
         update: false,
         rollback: false,
         plan: Plan::default(),
@@ -393,13 +401,20 @@ fn work(request: &Request) -> Result<Work> {
                     let p = sw.plan(&ids, &user(), &have)?;
                     for id in &ids {
                         if let Some(i) = sw.item(id).filter(|i| !have.has(i)) {
-                            let how = if i.flatpak.is_some() { "for you, from Flathub" } else { "for everyone" };
+                            let how = if i.flatpak.is_some() {
+                                "for you, from Flathub"
+                            } else if i.profile.is_some() {
+                                "for you, into your Nix profile"
+                            } else {
+                                "for everyone"
+                            };
                             w.plan.changes.push(change(&i.name, how, NYXOS));
                         }
                     }
                     w.plan.notes = p.consent.iter().map(|c| c.describe()).collect();
                     w.system = p.changes;
                     w.flatpak_install = p.flatpaks;
+                    w.flake_install = p.profiles;
                 }
                 NIXPKGS => {
                     let unfree: Vec<String> = packages.iter().filter(|p| unfree(p)).cloned().collect();
@@ -429,6 +444,7 @@ fn work(request: &Request) -> Result<Work> {
                 let p = sw.removal(&BTreeSet::from([package.clone()]), &Have::probe(settings))?;
                 w.system = p.changes;
                 w.flatpak_remove = p.flatpaks;
+                w.flake_remove = p.profiles;
                 w.plan.changes.push(Change { name: item.name.clone(), source: NYXOS.into(), ..removed });
             } else if settings.packages.contains(package) {
                 w.system.push(SystemChange::RemovePackages { packages: vec![package.clone()] });
@@ -533,6 +549,8 @@ fn apply(w: &Work, send: &async_channel::Sender<Event>) -> Result<String> {
     };
     nyx_catalog::flatpak(&w.flatpak_install, true, line)?;
     nyx_catalog::flatpak(&w.flatpak_remove, false, line)?;
+    nyx_catalog::nix_profile(&w.flake_install, true, line)?;
+    nyx_catalog::nix_profile(&w.flake_remove, false, line)?;
     for element in &w.profile_remove {
         step(send, "nix", &["profile", "remove", element], None)?;
     }
