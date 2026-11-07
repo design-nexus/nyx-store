@@ -731,7 +731,9 @@ fn render() {
                     break;
                 }
             }
-            if apps.is_empty() {
+            if apps.is_empty() && nyx_store::nix::active() {
+                text("No apps match. Try another search, or enable “Include packages.”");
+            } else if apps.is_empty() {
                 text("No apps match. Try another search, select AUR, or enable “Include packages.”");
             } else {
                 grid(&apps);
@@ -885,7 +887,12 @@ fn details(app: App) {
     summary.set_wrap(true);
     summary.set_xalign(0.0);
     info.append(&summary);
-    info.append(&widgets::label(&format!("{} · {}", source_name(&app.source), app.version), "source-tag"));
+    let source = if app.version.is_empty() {
+        source_name(&app.source).to_string()
+    } else {
+        format!("{} · {}", source_name(&app.source), app.version)
+    };
+    info.append(&widgets::label(&source, "source-tag"));
     head.append(&info);
     content.append(&head);
     let description = widgets::label(if app.description.is_empty() { &app.summary } else { &app.description }, "");
@@ -931,7 +938,8 @@ fn details(app: App) {
     let actions = widgets::hbox(8);
     actions.set_halign(gtk::Align::End);
     let d = dialog.clone();
-    actions.append(&button("Close", move || d.close()));
+    let close = button("Close", move || d.close());
+    actions.append(&close);
     if app.installed.is_some() {
         if !app.desktop_id.is_empty() {
             let a = app.clone();
@@ -972,6 +980,8 @@ fn details(app: App) {
     }
     card.append(&actions);
     dialog.present();
+    // The selectable description would take the focus and open with all its text selected.
+    close.grab_focus();
 }
 
 /// A source as people read it.
@@ -1438,7 +1448,13 @@ fn transaction_review(plan: Plan) {
     dialog.set_default_height(600);
     let bytes: i64 = plan.changes.iter().map(|c| c.bytes).sum();
     let note = widgets::label(
-        &if nyx_store::nix::active() {
+        &if nyx_store::nix::active() && plan.changes.iter().all(|c| c.source == "flathub") {
+            format!(
+                "{} {}. Flathub apps install for you alone, without an administrator's password.",
+                plan.changes.len(),
+                if plan.changes.len() == 1 { "change" } else { "changes" }
+            )
+        } else if nyx_store::nix::active() {
             format!(
                 "{} {}. Software for everyone is built into a new system generation first, and only switched to when the build works. Applying asks for an administrator's password.",
                 plan.changes.len(),
