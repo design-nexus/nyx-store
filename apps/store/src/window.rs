@@ -1451,7 +1451,7 @@ fn transaction_review(plan: Plan) {
     let note = widgets::label(
         &if nyx_store::nix::active() && plan.changes.iter().all(|c| c.source == "flathub") {
             format!(
-                "{} {}. Flathub apps install for you alone, without an administrator's password.",
+                "{} {}. Flathub apps are yours alone: changing them needs no administrator's password.",
                 plan.changes.len(),
                 if plan.changes.len() == 1 { "change" } else { "changes" }
             )
@@ -1769,6 +1769,16 @@ fn app_icon(app: &App, size: i32) -> gtk::Widget {
         .find(|(category, _)| *category == app.category)
         .map(|(_, icon)| *icon)
         .unwrap_or("application-x-executable-symbolic");
+    // An installed app the catalog has no icon for (the Nyx apps): its launcher's.
+    if !own
+        && !cached
+        && !app.desktop_id.is_empty()
+        && let Some(icon) = gio::DesktopAppInfo::new(&app.desktop_id).and_then(|a| a.icon())
+    {
+        let image = gtk::Image::from_gicon(&icon);
+        image.set_pixel_size(size);
+        return image.upcast();
+    }
     if !own && !cached {
         let image = gtk::Image::from_icon_name(symbol);
         image.set_pixel_size(size / 2);
