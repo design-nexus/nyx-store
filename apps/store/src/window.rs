@@ -899,6 +899,8 @@ fn details(app: App) {
     description.set_wrap(true);
     description.set_xalign(0.0);
     description.set_selectable(true);
+    // Focused, a selectable label selects all its text; it's still selected by dragging.
+    description.set_focusable(false);
     content.append(&description);
     if app.source == "aur" {
         content.append(&widgets::banner(
@@ -980,7 +982,6 @@ fn details(app: App) {
     }
     card.append(&actions);
     dialog.present();
-    // The selectable description would take the focus and open with all its text selected.
     close.grab_focus();
 }
 
