@@ -1760,6 +1760,17 @@ fn tone_chip(icon: &str, tone: &str, size: i32) -> gtk::Box {
 
 /// The app's icon at `size` px. An app without one shows its category's symbol on a
 /// tile in the category's colour.
+/// The icon of the launcher with this desktop ID, from every launcher's read once.
+fn launcher_icon(desktop_id: &str) -> Option<gio::Icon> {
+    thread_local! {
+        static ICONS: std::collections::HashMap<String, gio::Icon> = gio::AppInfo::all()
+            .into_iter()
+            .filter_map(|a| Some((a.id()?.to_string(), a.icon()?)))
+            .collect();
+    }
+    ICONS.with(|icons| icons.get(desktop_id).cloned())
+}
+
 fn app_icon(app: &App, size: i32) -> gtk::Widget {
     let cached = app.icon.starts_with("@cache:");
     let display = gdk::Display::default().unwrap();
@@ -1773,7 +1784,7 @@ fn app_icon(app: &App, size: i32) -> gtk::Widget {
     if !own
         && !cached
         && !app.desktop_id.is_empty()
-        && let Some(icon) = gio::DesktopAppInfo::new(&app.desktop_id).and_then(|a| a.icon())
+        && let Some(icon) = launcher_icon(&app.desktop_id)
     {
         let image = gtk::Image::from_gicon(&icon);
         image.set_pixel_size(size);
