@@ -458,18 +458,29 @@ fn work(request: &Request) -> Result<Work> {
             }
         }
         Request::Update => {
+            // `nyx update`'s own plan: the system, coding agents, Flatpaks and the nix
+            // profile. Firmware isn't updated from here.
             w.update = true;
-            w.plan.changes.push(change(
-                "NyxOS",
-                "latest",
-                "the system: NyxOS, its Nyx apps and everything installed for everyone",
-            ));
-            for id in flatpaks().into_keys() {
-                w.plan.changes.push(change(&id, "latest", FLATHUB));
+            let plan: serde_json::Value = serde_json::from_str(&command("nyx-system", &["update", "--dry-run", "--json"])?)?;
+            let text = |v: &serde_json::Value| v.as_str().map(String::from);
+            for item in plan["items"].as_array().into_iter().flatten() {
+                let how = text(&item["how"]).unwrap_or_default();
+                if how.starts_with("firmware") {
+                    continue;
+                }
+                w.plan.changes.push(Change {
+                    name: text(&item["name"]).unwrap_or_default(),
+                    old: text(&item["from"]),
+                    new: Some(text(&item["to"]).unwrap_or_else(|| "latest".into())),
+                    source: how,
+                    bytes: 0,
+                });
             }
-            for attr in profile().into_keys() {
-                w.plan.changes.push(change(&attr, "latest", "your nix profile"));
+            w.plan.notes.extend(plan["notes"].as_array().into_iter().flatten().filter_map(text));
+            if plan["steps"].as_array().is_some_and(|s| s.iter().any(|s| s["kind"] == "firmware")) {
+                w.plan.notes.push("Firmware has an update too: Settings > Software & Updates, or nyx update firmware.".into());
             }
+            ensure!(!w.plan.changes.is_empty(), "Everything is up to date");
         }
         Request::Rollback => {
             let (_, current, previous) = generations();
@@ -528,18 +539,58 @@ fn step(send: &async_channel::Sender<Event>, program: &str, args: &[&str], input
     Ok(())
 }
 
+/// `nyx update` without questions: its progress as status, then what came of it (each
+/// part that failed, or what finishing it takes).
+fn update(send: &async_channel::Sender<Event>) -> Result<String> {
+    let args = ["update", "--yes", "--json"];
+    let _ = send.send_blocking(Event::Status { message: format!("nyx-system {}", args.join(" ")) });
+    let mut child = Command::new("nyx-system")
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("nyx-system is missing")?;
+    let mut stdout = child.stdout.take().unwrap();
+    let out = std::thread::spawn(move || {
+        let mut s = String::new();
+        let _ = std::io::Read::read_to_string(&mut stdout, &mut s);
+        s
+    });
+    let mut last = String::new();
+    for line in BufReader::new(child.stderr.take().unwrap()).lines().map_while(Result::ok) {
+        if !line.trim().is_empty() {
+            let _ = send.send_blocking(Event::Status { message: line.clone() });
+            last = line;
+        }
+    }
+    let text = out.join().unwrap_or_default();
+    ensure!(child.wait()?.success(), "{}", last.trim_start_matches("nyx-system: "));
+    let outcome: serde_json::Value = serde_json::from_str(&text).context("nyx-system's answer couldn't be read")?;
+    let steps = outcome["steps"].as_array().cloned().unwrap_or_default();
+    let message = |s: &serde_json::Value| s["message"].as_str().unwrap_or_default().to_string();
+    let failed: Vec<String> = steps.iter().filter(|s| s["ok"] != true).map(message).collect();
+    if !failed.is_empty() {
+        let partly = if failed.len() < steps.len() { "Partly updated. " } else { "" };
+        bail!("{partly}{}", failed.join("; "));
+    }
+    let restart: Vec<&str> = outcome["restart"].as_array().into_iter().flatten().filter_map(|v| v.as_str()).collect();
+    Ok(if outcome["reboot"] == true {
+        "Updated. Restart the computer to finish.".into()
+    } else if !restart.is_empty() {
+        format!("Updated. Reopen {} to use the new versions.", restart.join(", "))
+    } else {
+        "Everything is up to date".into()
+    })
+}
+
 fn apply(w: &Work, send: &async_channel::Sender<Event>) -> Result<String> {
     if w.rollback {
         step(send, "nyx-system", &["rollback"], None)?;
         return Ok("Back to the previous generation".into());
     }
     if w.update {
-        step(send, "nyx-system", &["update"], None)?;
-        step(send, "flatpak", &["update", "--user", "--noninteractive", "-y"], None)?;
-        if !profile().is_empty() {
-            step(send, "nix", &["profile", "upgrade", "--all"], None)?;
-        }
-        return Ok("Everything is up to date".into());
+        return update(send);
     }
     if !w.system.is_empty() {
         step(send, "nyx-system", &["apply", "-"], Some(&serde_json::to_string(&w.system)?))?;
