@@ -1014,7 +1014,7 @@ dependencies = [
 [[package]]
 name = "nyx-catalog"
 version = "0.1.0"
-source = "git+https://github.com/nyxos-project/nyx-system.git?rev=87461e53c2fc5fb5e045204e2a492c32c86a3f26#87461e53c2fc5fb5e045204e2a492c32c86a3f26"
+source = "git+https://github.com/nyxos-project/nyx-system.git?rev=8514a6d9033ff276f9b9a0b6a55dc7ff9eb72d01#8514a6d9033ff276f9b9a0b6a55dc7ff9eb72d01"
 dependencies = [
  "anyhow",
  "nyx-system-proto",
@@ -1079,7 +1079,7 @@ dependencies = [
 [[package]]
 name = "nyx-system-proto"
 version = "0.1.0"
-source = "git+https://github.com/nyxos-project/nyx-system.git?rev=87461e53c2fc5fb5e045204e2a492c32c86a3f26#87461e53c2fc5fb5e045204e2a492c32c86a3f26"
+source = "git+https://github.com/nyxos-project/nyx-system.git?rev=8514a6d9033ff276f9b9a0b6a55dc7ff9eb72d01#8514a6d9033ff276f9b9a0b6a55dc7ff9eb72d01"
 dependencies = [
  "anyhow",
  "serde",

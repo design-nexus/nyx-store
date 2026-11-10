@@ -7,8 +7,8 @@ license = "GPL-3.0-or-later"
 repository = "https://github.com/design-nexus/nyx-store"
 
 [dependencies]
-nyx-catalog = { git = "https://github.com/nyxos-project/nyx-system.git", rev = "87461e53c2fc5fb5e045204e2a492c32c86a3f26" }
-nyx-system-proto = { git = "https://github.com/nyxos-project/nyx-system.git", rev = "87461e53c2fc5fb5e045204e2a492c32c86a3f26" }
+nyx-catalog = { git = "https://github.com/nyxos-project/nyx-system.git", rev = "8514a6d9033ff276f9b9a0b6a55dc7ff9eb72d01" }
+nyx-system-proto = { git = "https://github.com/nyxos-project/nyx-system.git", rev = "8514a6d9033ff276f9b9a0b6a55dc7ff9eb72d01" }
 nyx-core = { git = "https://github.com/design-nexus/nyx-core.git", rev = "4378e243aeb09733843996663cd9a5a7f0cbb821" }
 nyx-ui = { git = "https://github.com/design-nexus/nyx-design.git", rev = "40db521bab468d54f18f65c6aabd7fc8533d6a4d" }
 nyx-theme = { git = "https://github.com/design-nexus/nyx-design.git", rev = "40db521bab468d54f18f65c6aabd7fc8533d6a4d" }

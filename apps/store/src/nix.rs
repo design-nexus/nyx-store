@@ -158,7 +158,8 @@ fn profile() -> BTreeMap<String, (String, Installed)> {
     let mut out = BTreeMap::new();
     for (element, e) in v["elements"].as_object().into_iter().flatten() {
         let Some(attr) = e["attrPath"].as_str().and_then(|a| a.strip_prefix(SYSTEM)) else { continue };
-        if !e["originalUrl"].as_str().is_some_and(|u| u.contains(NIXPKGS)) {
+        // nixpkgs, or the system's channel (what apps from nixpkgs install from now).
+        if !e["originalUrl"].as_str().is_some_and(|u| u.contains(NIXPKGS) || u.starts_with("github:nyxos-project/nyxos")) {
             continue;
         }
         let path = e["storePaths"][0].as_str().unwrap_or("");
@@ -196,11 +197,19 @@ fn software() -> Result<Software> {
 /// What an item installs and needs, for its details.
 fn requirements(item: &Item) -> String {
     let mut lines = Vec::new();
+    let everyone = item.scope() == nyx_catalog::Scope::System;
     if !item.nyx.is_empty() {
-        lines.push("A Nyx app, installed for everyone.".to_string());
+        lines.push(
+            if everyone { "A Nyx app built into the desktop, installed for everyone." } else { "A Nyx app, installed for you." }
+                .to_string(),
+        );
     }
     if !item.packages.is_empty() {
-        lines.push(format!("Installs for everyone (nixpkgs): {}.", item.packages.join(", ")));
+        lines.push(if everyone {
+            format!("Installs for everyone (nixpkgs): {}.", item.packages.join(", "))
+        } else {
+            format!("Installs for you, into your Nix profile: {}.", item.packages.join(", "))
+        });
     }
     if let Some(f) = &item.flatpak {
         lines.push(format!("Installs for you from Flathub ({f})."));
@@ -403,7 +412,7 @@ fn work(request: &Request) -> Result<Work> {
                         if let Some(i) = sw.item(id).filter(|i| !have.has(i)) {
                             let how = if i.flatpak.is_some() {
                                 "for you, from Flathub"
-                            } else if i.profile.is_some() {
+                            } else if i.scope() == nyx_catalog::Scope::User {
                                 "for you, into your Nix profile"
                             } else {
                                 "for everyone"
@@ -416,15 +425,26 @@ fn work(request: &Request) -> Result<Work> {
                     w.flatpak_install = p.flatpaks;
                     w.flake_install = p.profiles;
                 }
+                // Apps from nixpkgs are the person's own, from the system's channel; an
+                // unfree one the catalog doesn't offer is installed for everyone, with its
+                // license accepted (per-user installs allow only the catalog's).
                 NIXPKGS => {
                     let unfree: Vec<String> = packages.iter().filter(|p| unfree(p)).cloned().collect();
+                    let have = Have::probe(settings);
                     for p in packages {
-                        w.plan.changes.push(change(p, "for everyone", NIXPKGS));
+                        if unfree.contains(p) {
+                            w.plan.changes.push(change(p, "for everyone", NIXPKGS));
+                        } else {
+                            w.plan.changes.push(change(p, "for you, into your Nix profile", NIXPKGS));
+                            w.flake_install.push(have.reference(p));
+                        }
                     }
                     for u in &unfree {
                         w.plan.notes.push(format!("{u} has a license that isn't free; installing it accepts that license"));
                     }
-                    w.system.push(SystemChange::AddPackages { packages: packages.clone(), unfree });
+                    if !unfree.is_empty() {
+                        w.system.push(SystemChange::AddPackages { packages: unfree.clone(), unfree });
+                    }
                 }
                 FLATHUB => {
                     for p in packages {
