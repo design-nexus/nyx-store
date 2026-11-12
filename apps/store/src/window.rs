@@ -169,12 +169,6 @@ fn build(app: &gtk::Application) {
         gtk::ApplicationWindow::builder().application(app).default_width(1280).default_height(800).title("Store").build();
     window.set_titlebar(Some(&gtk::Box::new(gtk::Orientation::Horizontal, 0)));
     window.add_css_class("store-window");
-    let overlay = gtk::Overlay::new();
-    let frame = widgets::vbox(0);
-    frame.add_css_class("window-frame");
-    frame.add_css_class("store-frame");
-    let body_row = widgets::hbox(0);
-    body_row.set_vexpand(true);
     let nav = widgets::vbox(0);
     nav.add_css_class("settings-navigation");
     nav.set_hexpand(false);
@@ -217,7 +211,6 @@ fn build(app: &gtk::Application) {
         .child(&list)
         .build();
     nav.append(&nav_scroll);
-    body_row.append(&nav);
     let column = widgets::vbox(0);
     column.add_css_class("settings-content");
     column.set_hexpand(true);
@@ -247,7 +240,6 @@ fn build(app: &gtk::Application) {
         .vscrollbar_policy(gtk::PolicyType::External)
         .build();
     column.append(&scroll);
-    body_row.append(&column);
 
     // ----- Header -----
     // The app and the page, the sidebar toggle; the search in the middle; what the
@@ -273,9 +265,11 @@ fn build(app: &gtk::Application) {
     refresh_button.connect_clicked(|_| refresh(true));
     header.end.append(&refresh_button);
     header.end.append(&chrome::settings_button(settings));
-    frame.append(&header.root);
-    frame.append(&body_row);
-    overlay.set_child(Some(&frame));
+    let frame = nyx_ui::frame::AppFrame::new(&header.root);
+    frame.root.add_css_class("store-frame");
+    frame.set_sidebar(&nav);
+    frame.set_page(&column);
+    let overlay = frame.install(&window);
     let toast_label = widgets::label("", "store-toast");
     toast_label.add_css_class("toast");
     toast_label.set_wrap(true);
@@ -284,7 +278,6 @@ fn build(app: &gtk::Application) {
     toast_label.set_margin_bottom(48);
     toast_label.set_visible(false);
     overlay.add_overlay(&toast_label);
-    window.set_child(Some(&overlay));
     let p = prefs::get();
     let first = nyx_theme::start_page("home", &p.last_section);
     let u = Rc::new(Ui {
