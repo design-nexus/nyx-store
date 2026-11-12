@@ -7,11 +7,11 @@ license = "GPL-3.0-or-later"
 repository = "https://github.com/design-nexus/nyx-store"
 
 [dependencies]
-nyx-catalog = { git = "https://github.com/nyxos-project/nyx-system.git", rev = "8514a6d9033ff276f9b9a0b6a55dc7ff9eb72d01" }
-nyx-system-proto = { git = "https://github.com/nyxos-project/nyx-system.git", rev = "8514a6d9033ff276f9b9a0b6a55dc7ff9eb72d01" }
-nyx-core = { git = "https://github.com/design-nexus/nyx-core.git", rev = "918729504918ec344b3a853a5ce0ea2c9dbb7b5f" }
-nyx-ui = { git = "https://github.com/design-nexus/nyx-design.git", rev = "6b2550bf06ea0d8c8c7e52cff03d4236d46d9777" }
-nyx-theme = { git = "https://github.com/design-nexus/nyx-design.git", rev = "6b2550bf06ea0d8c8c7e52cff03d4236d46d9777" }
+nyx-catalog = { git = "https://github.com/nyxos-project/nyx-system.git", rev = "a1af19d296315e8961d9488dd8c45638f44d598d" }
+nyx-system-proto = { git = "https://github.com/nyxos-project/nyx-system.git", rev = "a1af19d296315e8961d9488dd8c45638f44d598d" }
+nyx-core = { git = "https://github.com/design-nexus/nyx-core.git", rev = "32f0c5e154fc44c763b8ecd80d35a3b298723afa" }
+nyx-ui = { git = "https://github.com/design-nexus/nyx-design.git", rev = "4f8e16d6ae3dbc2a14091271e3b6bb29902c0df4" }
+nyx-theme = { git = "https://github.com/design-nexus/nyx-design.git", rev = "4f8e16d6ae3dbc2a14091271e3b6bb29902c0df4" }
 gtk = { version = "0.11", package = "gtk4", features = ["v4_18"] }
 alpm = "5.0.2"
 alpm-utils = "5.0.0"
