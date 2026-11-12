@@ -330,6 +330,8 @@ fn collections(apps: &[App]) {
         tile.add_css_class("collection-tile");
         tile.add_css_class(&format!("tone-{tone}"));
         tile.set_tooltip_text(Some(&format!("Browse {}", category.to_lowercase())));
+        // The child replaces the button's label, so it has no name of its own.
+        tile.update_property(&[gtk::accessible::Property::Label(&format!("{title}: {category}"))]);
         let content = widgets::hbox(12);
         content.append(&tone_chip(icon, tone, 36));
         let words = widgets::vbox(1);
