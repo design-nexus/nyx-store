@@ -273,6 +273,27 @@ pub struct Catalog {
     pub repositories: Vec<crate::repositories::Repository>,
     pub updates: Vec<crate::model::Change>,
     pub warning: String,
+    /// NyxOS: the catalog's categories in its order, each with its section.
+    pub groups: Vec<Group>,
+    /// NyxOS: the catalog's presets.
+    pub bundles: Vec<Bundle>,
+}
+
+/// A NyxOS catalog category and the section it's in, as (id, name).
+#[derive(Clone, Debug, Default)]
+pub struct Group {
+    pub id: String,
+    pub name: String,
+    pub section: (String, String),
+}
+
+/// A NyxOS catalog preset: catalog items installed together.
+#[derive(Clone, Debug, Default)]
+pub struct Bundle {
+    pub id: String,
+    pub name: String,
+    pub summary: String,
+    pub items: Vec<String>,
 }
 
 pub fn load(cache: &Path, refresh: bool) -> Result<Catalog> {
@@ -380,7 +401,7 @@ pub fn load(cache: &Path, refresh: bool) -> Result<Catalog> {
     if !repositories.iter().any(|r| r.name == "blackarch") {
         repositories.push(crate::repositories::blackarch());
     }
-    Ok(Catalog { apps, installed, sources, candidates, repositories, updates, warning })
+    Ok(Catalog { apps, installed, sources, candidates, repositories, updates, warning, groups: Vec::new(), bundles: Vec::new() })
 }
 
 fn enrich_launcher(p: &alpm::Package, app: &mut App) {

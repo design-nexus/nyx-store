@@ -18,6 +18,33 @@ pub struct App {
     pub desktop: bool,
     pub popular: bool,
     pub download_size: i64,
+    /// A Nyx app (NyxOS catalog).
+    #[serde(default)]
+    pub nyx: bool,
+    /// Preinstalled with NyxOS: it can be opened but not removed.
+    #[serde(default)]
+    pub built_in: bool,
+    /// The NyxOS catalog's section and category, as (id, name).
+    #[serde(default)]
+    pub section: (String, String),
+    #[serde(default)]
+    pub group: (String, String),
+    /// Who it installs for on NyxOS: `you` or `everyone`.
+    #[serde(default)]
+    pub scope: String,
+    /// More names search finds it by (aliases, its command, its attributes).
+    #[serde(default)]
+    pub keywords: Vec<String>,
+    /// The same app from other sources, as (source, package).
+    #[serde(default)]
+    pub also: Vec<(String, String)>,
+}
+
+impl App {
+    /// Whether Store offers to remove it: not part of the system, not built into NyxOS.
+    pub fn removable(&self) -> bool {
+        !self.built_in && !protected(&self.package)
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

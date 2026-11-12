@@ -8,7 +8,7 @@ fn main() -> glib::ExitCode {
     nyx_core::app::init(nyx_core::app::App { slug: "nyx-store", name: "Store" });
     if std::env::args().any(|a| a == "--help") {
         println!(
-            "Usage: nyx-store [--section home|categories|installed|updates|repositories] [--search TEXT] [--remove DESKTOP-ID]\n\
+            "Usage: nyx-store [--section home|nyx|categories|installed|updates|repositories] [--search TEXT] [--remove DESKTOP-ID]\n\
              \n  --remove DESKTOP-ID  show the installed app a launcher belongs to, to remove it"
         );
         return glib::ExitCode::SUCCESS;
@@ -55,17 +55,7 @@ fn main() -> glib::ExitCode {
         let query: String = std::env::args().skip(i + 1).collect::<Vec<_>>().join(" ").to_lowercase();
         return match nyx_store::catalog::load(&nyx_core::paths::cache_dir(), false) {
             Ok(c) => {
-                let words: Vec<&str> = query.split_whitespace().collect();
-                let mut found: Vec<&nyx_store::model::App> = c
-                    .apps
-                    .iter()
-                    .filter(|a| {
-                        let hay = format!("{} {} {} {}", a.name, a.package, a.summary, a.category).to_lowercase();
-                        words.iter().all(|w| hay.contains(w))
-                    })
-                    .collect();
-                // Apps with a window first, then popular ones, then by name.
-                found.sort_by_key(|a| (!a.desktop, !a.popular, a.name.to_lowercase()));
+                let found = nyx_store::search::rank(&c.apps, &query, true);
                 let apps: Vec<serde_json::Value> = found
                     .iter()
                     .take(15)

@@ -20,6 +20,8 @@ use std::{
 
 const PAGES: &[(&str, &str, &str)] = &[
     ("home", "Home", "go-home-symbolic"),
+    // NyxOS only; its icon is the system logo.
+    ("nyx", "Nyx Apps", ""),
     ("categories", "Categories", "view-grid-symbolic"),
     ("installed", "Installed", "emblem-default-symbolic"),
     ("updates", "Updates", "software-update-available-symbolic"),
@@ -43,13 +45,23 @@ struct Ui {
     nav: gtk::Box,
     header: chrome::AppHeader,
     nav_buttons: Vec<(String, gtk::Button)>,
+    /// A count beside a sidebar item (the updates available).
+    nav_badges: Vec<(String, gtk::Label)>,
     body: gtk::Box,
     scroll: gtk::ScrolledWindow,
     search: gtk::SearchEntry,
-    /// The source filter and Include packages, shown on the pages they filter.
-    toolbar: gtk::Box,
-    source: gtk::DropDown,
-    packages: gtk::CheckButton,
+    /// The search's source button: `None` for all, `nyx` for Nyx apps, else a source.
+    /// It only filters search results and resets when the search is cleared.
+    search_source: RefCell<Option<String>>,
+    /// Include packages: libraries and command-line packages in search results.
+    include_packages: Cell<bool>,
+    /// The page the search was started from, to go back to when it's cleared.
+    return_page: RefCell<String>,
+    /// The nixpkgs or AUR search is running, or what went wrong with it.
+    searching: Cell<bool>,
+    search_error: RefCell<String>,
+    /// NyxOS: nyx update's last check (when, and what it found).
+    system_updates: RefCell<Option<(i64, Vec<nyx_store::model::Change>)>>,
     status: gtk::Label,
     notice: gtk::Label,
     spinner: gtk::Spinner,
@@ -169,23 +181,33 @@ fn build(app: &gtk::Application) {
     let list = widgets::vbox(0);
     list.set_hexpand(false);
     let mut nav_buttons = Vec::new();
-    // On NixOS the sources are Flathub and nixpkgs; there are no repositories to manage.
-    for &(id, title, icon) in PAGES.iter().filter(|p| !(nyx_store::nix::active() && p.0 == "repositories")) {
+    let mut nav_badges = Vec::new();
+    for &(id, title, icon) in PAGES.iter().filter(|p| page_available(p.0)) {
         let button = gtk::Button::new();
         button.add_css_class("nav-item");
         button.set_tooltip_text(Some(title));
         let row = widgets::hbox(12);
-        row.append(&gtk::Image::from_icon_name(icon));
+        if icon.is_empty() {
+            row.append(&widgets::logo(16));
+        } else {
+            row.append(&gtk::Image::from_icon_name(icon));
+        }
         let label = widgets::label(title, "nav-label");
         label.add_css_class("compact-hide");
         label.set_hexpand(true);
         label.set_ellipsize(gtk::pango::EllipsizeMode::End);
         label.set_xalign(0.0);
         row.append(&label);
+        let badge = widgets::label("", "nav-badge");
+        badge.add_css_class("compact-hide");
+        badge.set_visible(false);
+        badge.set_valign(gtk::Align::Center);
+        row.append(&badge);
         button.set_child(Some(&row));
         button.connect_clicked(move |_| navigate(id));
         list.append(&button);
         nav_buttons.push((id.into(), button));
+        nav_badges.push((id.into(), badge));
     }
     let nav_scroll = gtk::ScrolledWindow::builder()
         .hexpand(false)
@@ -205,15 +227,6 @@ fn build(app: &gtk::Application) {
     search.set_width_chars(SEARCH_WIDE);
     search.update_property(&[gtk::accessible::Property::Label(search_label())]);
     search.connect_stop_search(|e| e.set_text(""));
-    let toolbar = widgets::hbox(8);
-    toolbar.add_css_class("store-toolbar");
-    let source = gtk::DropDown::from_strings(&["All sources", "AUR"]);
-    source.set_tooltip_text(Some("Filter by repository"));
-    toolbar.append(&source);
-    let packages = gtk::CheckButton::with_label("Include packages");
-    packages.set_tooltip_text(Some("Include command-line tools, libraries and system packages in search"));
-    toolbar.append(&packages);
-    column.append(&toolbar);
     let notice_label = widgets::label("", "store-notice");
     notice_label.set_wrap(true);
     notice_label.set_xalign(0.0);
@@ -280,12 +293,16 @@ fn build(app: &gtk::Application) {
         nav: nav.clone(),
         header,
         nav_buttons,
+        nav_badges,
         body,
         scroll,
         search: search.clone(),
-        toolbar,
-        source: source.clone(),
-        packages: packages.clone(),
+        search_source: RefCell::new(None),
+        include_packages: Cell::new(false),
+        return_page: RefCell::new("home".into()),
+        searching: Cell::new(false),
+        search_error: RefCell::new(String::new()),
+        system_updates: RefCell::new(None),
         status,
         notice: notice_label,
         spinner,
@@ -308,27 +325,28 @@ fn build(app: &gtk::Application) {
         pending_remove: RefCell::new(None),
     });
     UI.with(|v| *v.borrow_mut() = Some(u.clone()));
-    source.connect_selected_notify(|_| {
-        if selected_source().is_some() && ui().page.borrow().as_str() == "home" {
-            navigate("search");
-        } else {
-            render();
-        }
-    });
-    packages.connect_toggled(|_| render());
     search.connect_search_changed(|entry| {
         let u = ui();
+        let page = u.page.borrow().clone();
         if !entry.text().is_empty() {
-            *u.page.borrow_mut() = "search".into();
-        } else if u.page.borrow().as_str() == "search" {
-            *u.page.borrow_mut() = "home".into();
+            if page != "search" {
+                *u.return_page.borrow_mut() = page;
+                *u.page.borrow_mut() = "search".into();
+            }
+        } else if page == "search" {
+            let back = u.return_page.borrow().clone();
+            *u.page.borrow_mut() = if back.is_empty() || back == "search" { "home".into() } else { back };
+            u.search_source.borrow_mut().take();
         }
         u.aur.borrow_mut().clear();
-        render();
+        u.search_error.borrow_mut().clear();
         let generation = u.search_generation.get() + 1;
         u.search_generation.set(generation);
         let query = entry.text().to_string();
-        if prefs::get().include_aur && query.chars().count() >= 2 {
+        let remote = prefs::get().include_aur && query.chars().count() >= 2;
+        u.searching.set(remote);
+        render();
+        if remote {
             glib::timeout_add_local_once(std::time::Duration::from_millis(350), move || {
                 if !prefs::get().include_aur || ui().search_generation.get() != generation {
                     return;
@@ -341,6 +359,7 @@ fn build(app: &gtk::Application) {
                 glib::spawn_future_local(async move {
                     if let Ok(result) = rx.recv().await
                         && prefs::get().include_aur && ui().search_generation.get() == generation {
+                            ui().searching.set(false);
                             match result {
                                 Ok(mut apps) => {
                                     if let Some(c) = ui().catalog.borrow().as_ref() {
@@ -355,10 +374,10 @@ fn build(app: &gtk::Application) {
                                         }
                                     }
                                     *ui().aur.borrow_mut() = apps;
-                                    render();
                                 }
-                                Err(e) => notice(&e),
+                                Err(e) => *ui().search_error.borrow_mut() = e,
                             }
+                            render();
                         }
                 });
             });
@@ -378,9 +397,12 @@ fn build(app: &gtk::Application) {
                     nyx_ui::settings_card::escape();
                 } else {
                     let u = ui();
-                    u.search.set_text("");
                     gtk::prelude::GtkWindowExt::set_focus(&u.window, None::<&gtk::Widget>);
-                    navigate("home");
+                    if u.search.text().is_empty() {
+                        navigate("home");
+                    } else {
+                        u.search.set_text("");
+                    }
                 }
             }
             _ => return glib::Propagation::Proceed,
@@ -454,6 +476,7 @@ fn responsive() {
         }
     }
     hide(u.nav.upcast_ref(), compact);
+    show_badges();
     // Narrow windows (a tiled half-screen) get a shorter search and no catalog counts.
     let narrow = width > 0 && width < 980;
     if narrow {
@@ -472,7 +495,14 @@ fn responsive() {
     u.search.set_width_chars(if narrow { SEARCH_NARROW } else { SEARCH_WIDE });
     u.search.set_placeholder_text(Some(&if narrow { "Search apps".to_string() } else { format!("{}  (Ctrl+F)", search_label()) }));
     u.status.set_visible(!narrow || u.busy.get() || u.loading.get());
-    u.packages.set_label(Some(if width > 0 && width < 900 { "Packages" } else { "Include packages" }));
+}
+/// Nyx Apps is NyxOS's; Repositories is Arch's (NyxOS's sources need no managing).
+fn page_available(page: &str) -> bool {
+    match page {
+        "nyx" => nyx_store::nix::active(),
+        "repositories" => !nyx_store::nix::active(),
+        _ => true,
+    }
 }
 fn navigate(page: &str) {
     if page == "settings" {
@@ -484,6 +514,7 @@ fn navigate(page: &str) {
     u.category.borrow_mut().clear();
     if page != "search" {
         u.search.set_text("");
+        u.search_source.borrow_mut().take();
         *u.page.borrow_mut() = page.into();
     }
     prefs::update(|p| p.last_section = page.into());
@@ -539,7 +570,8 @@ fn refresh(network: bool) {
                         let _ = std::fs::write(nyx_core::paths::cache_dir().join("catalog-refreshed"), b"");
                     }
                     *u.catalog.borrow_mut() = Some(catalog);
-                    update_sources();
+                    *u.system_updates.borrow_mut() =
+                        if nyx_store::nix::active() { nyx_store::nix::checked_updates() } else { None };
                     notice(&warning);
                     render();
                     if bootstrap {
@@ -582,41 +614,44 @@ fn button(label: &str, action: impl Fn() + 'static) -> gtk::Button {
     b.connect_clicked(move |_| action());
     b
 }
-fn selected_source() -> Option<String> {
-    ui().source
-        .selected_item()
-        .and_downcast::<gtk::StringObject>()
-        .map(|item| item.string().to_string())
-        .filter(|name| name != "All sources")
-        .map(|name| if name == "AUR" { "aur".into() } else { name })
+/// The apps another app already offers (in its `also`), shown only under that app.
+fn offered(apps: &[App]) -> BTreeSet<(String, String)> {
+    apps.iter().flat_map(|a| a.also.iter().cloned()).collect()
 }
-fn update_sources() {
-    let u = ui();
-    let selected = selected_source();
-    let mut names = vec!["All sources".to_string()];
-    if let Some(catalog) = u.catalog.borrow().as_ref() {
-        for repository in catalog.repositories.iter().filter(|r| r.enabled) {
-            if !names.contains(&repository.name) {
-                names.push(repository.name.clone());
-            }
-        }
-    }
-    if !nyx_store::nix::active() {
-        names.push("AUR".into());
-    }
-    let position = selected.and_then(|name| names.iter().position(|n| n == &name || (n == "AUR" && name == "aur"))).unwrap_or(0);
-    let _notifications = u.source.freeze_notify();
-    u.source.set_model(Some(&gtk::StringList::new(&names.iter().map(String::as_str).collect::<Vec<_>>())));
-    u.source.set_selected(position as u32);
+
+/// The catalog's apps to browse: one entry per package, without the ones another
+/// app already offers.
+fn browsable(c: &Catalog) -> Vec<&App> {
+    let offered = offered(&c.apps);
+    let mut seen = BTreeSet::new();
+    c.apps
+        .iter()
+        .filter(|a| !offered.contains(&(a.source.clone(), a.package.clone())))
+        .filter(|a| seen.insert(a.package.as_str()))
+        .collect()
 }
-fn source_match(a: &App) -> bool {
-    selected_source().is_none_or(|source| source == a.source)
+
+/// A source as a short tag on a row.
+fn source_tag(app: &App) -> Option<&'static str> {
+    if app.nyx {
+        return Some("Nyx");
+    }
+    match app.source.as_str() {
+        "aur" => Some("AUR"),
+        s if s == nyx_store::nix::NYXOS => Some("NyxOS"),
+        s if s == nyx_store::nix::FLATHUB => Some("Flathub"),
+        s if s == nyx_store::nix::NIXPKGS => Some("nixpkgs"),
+        _ => None,
+    }
 }
 
 fn render() {
     let u = ui();
     while let Some(c) = u.body.first_child() {
         u.body.remove(&c);
+    }
+    if !page_available(&u.page.borrow()) {
+        *u.page.borrow_mut() = "home".into();
     }
     let page = u.page.borrow().clone();
     for (id, b) in &u.nav_buttons {
@@ -629,119 +664,22 @@ fn render() {
     let title = PAGES.iter().find(|p| p.0 == page).map(|p| p.1).unwrap_or("Search");
     chrome::set_title(&u.window, "Store", title);
     u.header.set_subtitle(title);
-    let filters = match page.as_str() {
-        "search" | "installed" => true,
-        "categories" => !u.category.borrow().is_empty(),
-        _ => false,
-    };
-    u.toolbar.set_visible(filters);
     let c = u.catalog.borrow();
     let Some(c) = c.as_ref() else {
         text("Loading your app catalog…");
         return;
     };
+    update_badges(c);
+    let category = u.category.borrow().clone();
     match page.as_str() {
         "repositories" => render_repositories(c),
         "updates" => render_updates(c),
-        "categories" if u.category.borrow().is_empty() => {
-            heading("Categories", "Find the right app for what you want to do.");
-            let grid = gtk::FlowBox::builder()
-                .selection_mode(gtk::SelectionMode::None)
-                .min_children_per_line(2)
-                .max_children_per_line(4)
-                .column_spacing(12)
-                .row_spacing(12)
-                .homogeneous(true)
-                .build();
-            for &(name, icon) in catalog::CATEGORIES {
-                let tone = theme::tone(name);
-                let tile = gtk::Button::new();
-                tile.add_css_class("collection-tile");
-                tile.add_css_class(&format!("tone-{tone}"));
-                let row = widgets::hbox(12);
-                row.append(&tone_chip(icon, tone, 36));
-                let count = c.apps.iter().filter(|a| a.desktop && a.category == name).map(|a| &a.package).collect::<BTreeSet<_>>().len();
-                let words = widgets::vbox(1);
-                words.set_valign(gtk::Align::Center);
-                let title = widgets::label(name, "collection-name");
-                title.set_xalign(0.0);
-                words.append(&title);
-                let n = widgets::label(&format!("{count} apps"), "collection-count");
-                n.set_xalign(0.0);
-                words.append(&n);
-                row.append(&words);
-                tile.set_child(Some(&row));
-                tile.connect_clicked(move |_| {
-                    *ui().category.borrow_mut() = name.into();
-                    render();
-                });
-                grid.insert(&tile, -1);
-            }
-            u.body.append(&grid);
-        }
-        "home" => home::render(c),
-        _ => {
-            let query = u.search.text().to_lowercase();
-            let category = u.category.borrow().clone();
-            heading(
-                if page == "installed" {
-                    "Your apps"
-                } else if page == "categories" {
-                    &category
-                } else {
-                    "Search results"
-                },
-                if page == "installed" { "Desktop apps installed on this computer." } else { "" },
-            );
-            let mut apps = Vec::new();
-            let mut seen = BTreeSet::new();
-            for a in c.apps.iter().chain(u.aur.borrow().iter()) {
-                if !source_match(a) {
-                    continue;
-                }
-                if page == "installed" {
-                    if a.installed.is_none() || !a.desktop {
-                        continue;
-                    }
-                } else if page == "categories" {
-                    if !a.desktop || a.category != category {
-                        continue;
-                    }
-                } else {
-                    if !u.packages.is_active() && !a.desktop && selected_source().as_deref() != Some("aur") {
-                        continue;
-                    }
-                    if !format!("{} {} {}", a.name, a.package, a.summary).to_lowercase().contains(&query) {
-                        continue;
-                    }
-                }
-                // Prefer the installed source in the Installed page, and repository order elsewhere.
-                if page == "installed"
-                    && c.sources.get(&a.package).is_some_and(|(s, _)| s != &a.source)
-                    && c.apps.iter().any(|other| {
-                        other.package == a.package && c.sources.get(&a.package).is_some_and(|(s, _)| s == &other.source)
-                    })
-                {
-                    continue;
-                }
-                if seen.insert(a.package.clone()) {
-                    apps.push(a.clone());
-                }
-                if apps.len() == 200 {
-                    break;
-                }
-            }
-            if apps.is_empty() && nyx_store::nix::active() {
-                text("No apps match. Try another search, or enable “Include packages.”");
-            } else if apps.is_empty() {
-                text("No apps match. Try another search, select AUR, or enable “Include packages.”");
-            } else {
-                grid(&apps);
-            }
-            if apps.len() == 200 {
-                text("Showing the first 200 results. Narrow your search to find more.");
-            }
-        }
+        "nyx" => render_nyx(c),
+        "categories" if category.is_empty() => render_categories(c),
+        "categories" => render_category(c, &category),
+        "installed" => render_installed(c),
+        "search" => render_search(c),
+        _ => home::render(c),
     }
     if !u.busy.get() {
         u.status.set_text(&format!(
@@ -750,6 +688,338 @@ fn render() {
             c.apps.iter().filter(|a| a.desktop && a.installed.is_some()).map(|a| &a.package).collect::<BTreeSet<_>>().len(),
             if nyx_store::nix::active() { "NyxOS catalog, nixpkgs and Flathub" } else { "Omarchy first" }
         ));
+    }
+}
+
+/// The count of updates beside Updates in the sidebar: NyxOS's from `nyx update`'s last
+/// check (the Flathub ones in the catalog when there's none), Arch's from the catalog
+/// and the AUR check.
+fn update_badges(c: &Catalog) {
+    let u = ui();
+    let count = if nyx_store::nix::active() {
+        u.system_updates.borrow().as_ref().map(|(_, items)| items.len()).unwrap_or(c.updates.len())
+    } else {
+        c.updates.len() + u.aur_updates.borrow().len()
+    };
+    for (id, badge) in &u.nav_badges {
+        let n = if id == "updates" { count } else { 0 };
+        badge.set_text(&if n > 0 { n.to_string() } else { String::new() });
+    }
+    show_badges();
+}
+
+/// Badges show when they have a count and the sidebar has its labels.
+fn show_badges() {
+    let u = ui();
+    let compact = u.nav.has_css_class("compact");
+    for (_, badge) in &u.nav_badges {
+        badge.set_visible(!compact && !badge.text().is_empty());
+    }
+}
+
+/// A grid of tiles, for categories and bundles.
+fn tile_grid() -> gtk::FlowBox {
+    gtk::FlowBox::builder()
+        .selection_mode(gtk::SelectionMode::None)
+        .min_children_per_line(2)
+        .max_children_per_line(4)
+        .column_spacing(12)
+        .row_spacing(12)
+        .homogeneous(true)
+        .build()
+}
+
+/// A tile with its chip, name and a line under it (a count), in `tone`.
+fn tile(name: &str, line: &str, icon: &str, tone: &str, action: impl Fn() + 'static) -> gtk::Button {
+    let tile = gtk::Button::new();
+    tile.add_css_class("collection-tile");
+    tile.add_css_class(&format!("tone-{tone}"));
+    let row = widgets::hbox(12);
+    row.append(&tone_chip(icon, tone, 36));
+    let words = widgets::vbox(1);
+    words.set_valign(gtk::Align::Center);
+    let title = widgets::label(name, "collection-name");
+    title.set_xalign(0.0);
+    title.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    words.append(&title);
+    let n = widgets::label(line, "collection-count");
+    n.set_xalign(0.0);
+    n.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    words.append(&n);
+    row.append(&words);
+    tile.set_child(Some(&row));
+    tile.connect_clicked(move |_| action());
+    tile
+}
+
+fn open_category(key: String) {
+    *ui().category.borrow_mut() = key;
+    ui().scroll.vadjustment().set_value(0.0);
+    render();
+}
+
+/// The symbol for a NyxOS catalog section.
+fn section_icon(section: &str) -> &'static str {
+    match section {
+        "cli" => "utilities-terminal-symbolic",
+        "toolchains" => "applications-engineering-symbolic",
+        "infrastructure" => "network-server-symbolic",
+        "agents" => "system-run-symbolic",
+        _ => "view-app-grid-symbolic",
+    }
+}
+
+/// The NyxOS catalog's sections, in its order, as (id, name).
+fn sections(c: &Catalog) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    for g in &c.groups {
+        if !out.contains(&g.section) {
+            out.push(g.section.clone());
+        }
+    }
+    out
+}
+
+/// Categories: the kinds of apps, then on NyxOS the catalog's other sections (terminal
+/// tools, toolchains, infrastructure, agents), each with its categories.
+fn render_categories(c: &Catalog) {
+    let u = ui();
+    let apps = browsable(c);
+    heading("Categories", "Find the right app for what you want to do.");
+    let nix = nyx_store::nix::active();
+    let grid = tile_grid();
+    for &(name, icon) in catalog::CATEGORIES {
+        let count = apps.iter().filter(|a| a.desktop && a.category == name).count();
+        grid.insert(&tile(name, &format!("{count} apps"), icon, theme::tone(name), move || open_category(name.into())), -1);
+    }
+    u.body.append(&grid);
+    if !nix {
+        return;
+    }
+    for (section, section_name) in sections(c).into_iter().filter(|(id, _)| id != "nyx-apps" && id != "desktop") {
+        let groups: Vec<(&catalog::Group, usize)> = c
+            .groups
+            .iter()
+            .filter(|g| g.section.0 == section)
+            .map(|g| (g, c.apps.iter().filter(|a| a.group.0 == g.id && !a.built_in).count()))
+            .filter(|(_, n)| *n > 0)
+            .collect();
+        if groups.is_empty() {
+            continue;
+        }
+        heading(&section_name, "");
+        let grid = tile_grid();
+        for (g, count) in groups {
+            let key = format!("catalog:{}", g.id);
+            let noun = if c.apps.iter().any(|a| a.group.0 == g.id && a.desktop) { "apps" } else { "tools" };
+            grid.insert(&tile(&g.name, &format!("{count} {noun}"), section_icon(&section), theme::tone(&section_name), move || open_category(key.clone())), -1);
+        }
+        u.body.append(&grid);
+    }
+}
+
+/// One category's apps: a kind of app (`Graphics`), or a catalog category
+/// (`catalog:coding-agents`).
+fn render_category(c: &Catalog, key: &str) {
+    let (title, mut apps): (String, Vec<&App>) = match key.strip_prefix("catalog:") {
+        Some(id) => (
+            c.groups.iter().find(|g| g.id == id).map(|g| g.name.clone()).unwrap_or_else(|| id.to_string()),
+            c.apps.iter().filter(|a| a.group.0 == id && !a.built_in).collect(),
+        ),
+        None => (key.to_string(), browsable(c).into_iter().filter(|a| a.desktop && a.category == key).collect()),
+    };
+    if !key.starts_with("catalog:") {
+        apps.sort_by_cached_key(|a| (a.source != nyx_store::nix::NYXOS && !a.popular, a.name.to_lowercase()));
+    }
+    heading(&title, "");
+    if apps.is_empty() {
+        text("Nothing here yet.");
+        return;
+    }
+    let shown: Vec<App> = apps.iter().take(200).map(|a| (*a).clone()).collect();
+    grid(&shown);
+    if apps.len() > 200 {
+        text("Showing the first 200 apps. Search to find more.");
+    }
+}
+
+/// Nyx Apps: the Nyx suite, in the catalog's categories.
+fn render_nyx(c: &Catalog) {
+    let apps: Vec<&App> = c.apps.iter().filter(|a| a.nyx).collect();
+    let have = apps.iter().filter(|a| a.installed.is_some()).count();
+    heading(
+        "Nyx Apps",
+        &format!("Apps made for NyxOS, in one design and working together. {have} of {} installed.", apps.len()),
+    );
+    for g in &c.groups {
+        let group: Vec<App> = apps.iter().filter(|a| a.group.0 == g.id).map(|a| (*a).clone()).collect();
+        if group.is_empty() {
+            continue;
+        }
+        heading(&g.name, "");
+        grid(&group);
+    }
+}
+
+/// Installed: on NyxOS everything installed, by the catalog's sections; on Arch the
+/// desktop apps, each from the source it was installed from.
+fn render_installed(c: &Catalog) {
+    if nyx_store::nix::active() {
+        heading("Your apps", "Everything installed on this computer, from the NyxOS catalog, nixpkgs and Flathub.");
+        let installed: Vec<&App> = c.apps.iter().filter(|a| a.installed.is_some()).collect();
+        let offered: BTreeSet<(String, String)> = installed.iter().flat_map(|a| a.also.iter().cloned()).collect();
+        let mut seen = BTreeSet::new();
+        let installed: Vec<&App> = installed
+            .into_iter()
+            .filter(|a| !offered.contains(&(a.source.clone(), a.package.clone())))
+            .filter(|a| seen.insert((a.source.as_str(), a.package.as_str())))
+            .collect();
+        if installed.is_empty() {
+            text("Nothing installed from Store yet.");
+            return;
+        }
+        for (section, name) in sections(c) {
+            let mut apps: Vec<App> = installed
+                .iter()
+                .filter(|a| a.section.0 == section || (section == "desktop" && a.section.0.is_empty()))
+                .map(|a| (*a).clone())
+                .collect();
+            if apps.is_empty() {
+                continue;
+            }
+            apps.sort_by_cached_key(|a| a.name.to_lowercase());
+            heading(&name, "");
+            grid(&apps);
+        }
+        return;
+    }
+    heading("Your apps", "Desktop apps installed on this computer.");
+    let mut apps = Vec::new();
+    let mut seen = BTreeSet::new();
+    for a in c.apps.iter().filter(|a| a.installed.is_some() && a.desktop) {
+        // The source it was installed from, when another has it too.
+        if c.sources.get(&a.package).is_some_and(|(s, _)| s != &a.source)
+            && c.apps.iter().any(|other| {
+                other.package == a.package && c.sources.get(&a.package).is_some_and(|(s, _)| s == &other.source)
+            })
+        {
+            continue;
+        }
+        if seen.insert(a.package.clone()) {
+            apps.push(a.clone());
+        }
+    }
+    if apps.is_empty() {
+        text("No desktop apps installed from Store's sources yet.");
+    } else {
+        grid(&apps);
+    }
+}
+
+/// Search: the results for the query, best first, with a button per source that has
+/// any (and Include packages) above them. The source buttons only filter this page.
+fn render_search(c: &Catalog) {
+    let u = ui();
+    let query = u.search.text().to_string();
+    let filter = u.search_source.borrow().clone();
+    let include = u.include_packages.get();
+    let nix = nyx_store::nix::active();
+    let aur = u.aur.borrow();
+    let matched: Vec<&App> =
+        c.apps.iter().chain(aur.iter()).filter(|a| nyx_store::search::score(a, &query).is_some()).collect();
+    let shown = |a: &App, filter: Option<&str>| match filter {
+        None => include || a.desktop || a.source == nyx_store::nix::NYXOS,
+        Some("nyx") => a.nyx,
+        Some(s) => {
+            a.source == s && (include || a.desktop || matches!(s, "aur") || s == nyx_store::nix::NIXPKGS || s == nyx_store::nix::NYXOS)
+        }
+    };
+    let results_for = |f: Option<&str>| nyx_store::search::rank(matched.iter().copied().filter(|a| shown(a, f)), &query, f.is_none());
+    let results = results_for(filter.as_deref());
+
+    let head = widgets::hbox(10);
+    head.add_css_class("search-head");
+    let title = widgets::label(&format!("Results for “{}”", query.trim()), "shelf-title");
+    title.set_xalign(0.0);
+    title.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    head.append(&title);
+    let count = widgets::label(&format!("{}", results.len()), "collection-count");
+    count.set_valign(gtk::Align::Center);
+    head.append(&count);
+    u.body.append(&head);
+
+    let mut sources: Vec<(String, String)> = Vec::new();
+    if nix {
+        sources.push(("nyx".into(), "Nyx Apps".into()));
+        for s in [nyx_store::nix::NYXOS, nyx_store::nix::FLATHUB, nyx_store::nix::NIXPKGS] {
+            sources.push((s.into(), source_name(s).into()));
+        }
+    } else {
+        for r in c.repositories.iter().filter(|r| r.enabled) {
+            if !sources.iter().any(|(id, _)| id == &r.name) {
+                sources.push((r.name.clone(), r.name.clone()));
+            }
+        }
+        sources.push(("aur".into(), "AUR".into()));
+    }
+    let mut options = vec![(String::new(), format!("All  {}", results_for(None).len()))];
+    for (id, name) in sources {
+        let n = results_for(Some(&id)).len();
+        if n > 0 || filter.as_deref() == Some(id.as_str()) {
+            options.push((id, format!("{name}  {n}")));
+        }
+    }
+    let filters = widgets::hbox(12);
+    filters.add_css_class("search-filters");
+    let buttons = widgets::segmented(&options, filter.as_deref().unwrap_or(""), |id| {
+        *ui().search_source.borrow_mut() = (!id.is_empty()).then_some(id);
+        glib::idle_add_local_once(render);
+    });
+    buttons.set_hexpand(true);
+    buttons.set_halign(gtk::Align::Start);
+    filters.append(&buttons);
+    let packages = gtk::CheckButton::with_label("Include packages");
+    packages.set_tooltip_text(Some("Include command-line tools, libraries and system packages in search"));
+    packages.set_active(include);
+    packages.set_valign(gtk::Align::Center);
+    packages.connect_toggled(|b| {
+        ui().include_packages.set(b.is_active());
+        glib::idle_add_local_once(render);
+    });
+    filters.append(&packages);
+    u.body.append(&filters);
+
+    if results.is_empty() && !u.searching.get() {
+        let hint = if filter.is_some() {
+            "Try All."
+        } else if !include {
+            "Try Include packages to search libraries and command-line packages too."
+        } else {
+            "Try other words."
+        };
+        text(&format!("Nothing matches “{}”. {hint}", query.trim()));
+    } else {
+        let shown: Vec<App> = results.iter().take(200).map(|a| (*a).clone()).collect();
+        grid(&shown);
+        if results.len() > 200 {
+            text("Showing the best 200 results. Add a word to narrow them down.");
+        }
+    }
+    let remote = if nix { "nixpkgs" } else { "the AUR" };
+    if u.searching.get() {
+        let row = widgets::hbox(8);
+        row.add_css_class("search-more");
+        let spinner = gtk::Spinner::new();
+        spinner.start();
+        row.append(&spinner);
+        row.append(&widgets::label(&format!("Searching {remote}…"), "collection-count"));
+        u.body.append(&row);
+    } else if !u.search_error.borrow().is_empty() {
+        let row = widgets::label(&format!("Couldn't search {remote}: {}", u.search_error.borrow()), "collection-count");
+        row.add_css_class("search-more");
+        row.set_wrap(true);
+        row.set_xalign(0.0);
+        u.body.append(&row);
     }
 }
 
@@ -766,7 +1036,10 @@ fn grid(apps: &[App]) {
         .homogeneous(true)
         .build();
     grid.add_css_class("store-grid");
-    let searching = ui().page.borrow().as_str() == "search";
+    let page = ui().page.borrow().clone();
+    let searching = page == "search";
+    // Where sources mix, each row says where it's from.
+    let tagged = nyx_store::nix::active() && matches!(page.as_str(), "search" | "categories" | "installed");
     let shown: Vec<App> = apps.iter().take(200).cloned().collect();
     for app in &shown {
         let row = widgets::hbox(12);
@@ -795,10 +1068,12 @@ fn grid(apps: &[App]) {
         about.set_max_width_chars(26);
         about.set_hexpand(true);
         line.append(&about);
-        if app.source == "aur" {
-            line.append(&widgets::label("AUR", "row-tag"));
+        if let Some(tag) = source_tag(app).filter(|t| tagged || *t == "AUR") {
+            line.append(&widgets::label(tag, "row-tag"));
         }
-        if searching && app.installed.is_some() {
+        if app.built_in {
+            line.append(&widgets::label("Built in", "row-tag"));
+        } else if searching && app.installed.is_some() {
             line.append(&widgets::label("Installed", "row-tag"));
         }
         text.append(&line);
@@ -912,6 +1187,44 @@ fn details(app: App) {
         content.append(&widgets::row("License", &app.license, None));
     }
     content.append(&widgets::row("Package", &app.package, None));
+    if nyx_store::nix::active() && !app.scope.is_empty() {
+        let (title, detail) = if app.built_in {
+            ("Built into NyxOS", "Part of the system for everyone; it can't be removed.")
+        } else if app.scope == "everyone" {
+            ("Installs for everyone", "Built into a new system generation; asks for an administrator's password.")
+        } else {
+            ("Installs for you", "Into your own apps; no password needed.")
+        };
+        content.append(&widgets::row(title, detail, None));
+    }
+    for (source, package) in &app.also {
+        let other = ui().catalog.borrow().as_ref().and_then(|c| c.apps.iter().find(|a| &a.source == source && &a.package == package).cloned());
+        let Some(other) = other else { continue };
+        let d = dialog.clone();
+        let (row, _) = widgets::button_row(
+            &format!("Also on {}", source_name(source)),
+            &if other.installed.is_some() { format!("{} · installed", other.name) } else { other.name.clone() },
+            "Show",
+            move |_| {
+                d.close();
+                details(other.clone());
+            },
+        );
+        content.append(&row);
+    }
+    if nyx_store::nix::active() && !app.built_in && [nyx_store::nix::NYXOS, nyx_store::nix::NIXPKGS].contains(&app.source.as_str()) {
+        let command = format!("nyx install {}", app.package);
+        let copy = widgets::bar_button("edit-copy-symbolic", "Copy the command");
+        copy.set_valign(gtk::Align::Center);
+        let c = command.clone();
+        copy.connect_clicked(move |b| {
+            b.clipboard().set_text(&c);
+            toast("Copied the install command");
+        });
+        let row = widgets::row("Install from a terminal", &command, Some(copy.upcast_ref()));
+        row.add_css_class("install-command");
+        content.append(&row);
+    }
     if let Some(version) = &app.installed {
         content.append(&widgets::row("Installed version", version, None));
     }
@@ -947,7 +1260,7 @@ fn details(app: App) {
             let a = app.clone();
             actions.append(&button("Open", move || launch(&a)));
         }
-        if !nyx_store::model::protected(&app.package) {
+        if app.removable() {
             let package = app.package.clone();
             let d = dialog.clone();
             let armed = Rc::new(Cell::new(false));
@@ -1067,7 +1380,28 @@ fn render_nixos_updates(c: &Catalog) {
     update.set_margin_top(12);
     update.set_sensitive(!ui().busy.get());
     ui().body.append(&update);
-    if c.updates.is_empty() {
+    let checked = ui().system_updates.borrow().clone();
+    if let Some((time, items)) = checked {
+        if items.is_empty() {
+            text(&format!("Everything was up to date at the last check, {}.", ago(time)));
+        } else {
+            let note = widgets::label(&format!("Found by the last check, {}.", ago(time)), "collection-note");
+            note.set_xalign(0.0);
+            note.set_margin_top(12);
+            ui().body.append(&note);
+            let list = widgets::vbox(0);
+            list.add_css_class("group-list");
+            for change in &items {
+                let detail = match (&change.old, &change.new) {
+                    (Some(old), Some(new)) => format!("{old} → {new} · {}", change.source),
+                    (None, Some(new)) => format!("{new} · {}", change.source),
+                    _ => change.source.clone(),
+                };
+                list.append(&widgets::row(&change.name, &detail, None));
+            }
+            ui().body.append(&list);
+        }
+    } else if c.updates.is_empty() {
         text("No Flathub updates in the cached catalog. Refresh to check again.");
     } else {
         for change in &c.updates {
@@ -1084,6 +1418,18 @@ fn render_nixos_updates(c: &Catalog) {
     let (row, back) = widgets::button_row("Go back a generation", &detail, "Go Back", |_| start_request(Request::Rollback));
     back.set_sensitive(previous.is_some() && !ui().busy.get());
     ui().body.append(&row);
+}
+
+/// How long ago a time (seconds since the epoch) was, in words.
+fn ago(time: i64) -> String {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+    let plural = |n: i64, unit: &str| format!("{n} {unit}{} ago", if n == 1 { "" } else { "s" });
+    match (now - time).max(0) {
+        s if s < 60 => "just now".into(),
+        s if s < 3600 => plural(s / 60, "minute"),
+        s if s < 86400 => plural(s / 3600, "hour"),
+        s => plural(s / 86400, "day"),
+    }
 }
 
 fn check_aur_updates() {

@@ -73,6 +73,17 @@ supplies additional descriptions and screenshots; refresh downloads its data pac
 without installing it. Libraries and system packages appear only with **Include
 packages** in search or as dependencies in transaction reviews.
 
+Search ranks results by how well the name matches, then the names an app answers to,
+then its summary. The buttons above the results narrow them to one source; they only
+filter the search, and clearing it returns to the page it started from. An app another
+source also has (a catalog app that installs from Flathub) shows once, and its details
+link to the other source.
+
+On NyxOS, **Nyx Apps** lists the Nyx suite, built-in apps included. Home adds the Nyx
+apps and the catalog's bundles, each installed through one review. Categories and
+Installed follow the catalog's sections (terminal tools, toolchains, infrastructure,
+agents), and the Updates count comes from `nyx update`'s last check.
+
 ## Keyboard
 
 | Key | Action |

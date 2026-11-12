@@ -248,35 +248,57 @@ pub fn load(cache: &Path, refresh: bool) -> Result<Catalog> {
 
     let settings = system_settings();
     let have = Have::probe(settings.clone());
+    let sw = software()?;
+    let groups = groups(&sw);
     let mut apps = Vec::new();
     let mut installed = BTreeMap::new();
-    for item in software()?.items.into_iter().filter(|i| i.tier != Tier::Base) {
+    for item in sw.items.iter().filter(|i| i.tier != Tier::Base || !i.nyx.is_empty()) {
         let looks = item.flatpak.as_deref().and_then(|f| by_id.get(f)).or_else(|| item.packages.first().and_then(|p| art(p)));
-        let mut a = looks.cloned().unwrap_or_else(|| App { desktop: true, ..Default::default() });
+        let mut a = looks.cloned().unwrap_or_default();
+        let group = groups.iter().find(|g| g.id == item.category).cloned().unwrap_or_default();
         a.package = item.id.clone();
         a.name = item.name.clone();
         a.summary = item.summary.clone();
-        a.description = requirements(&item);
+        a.description = requirements(item);
         a.category = category(&item.category).into();
         a.source = NYXOS.into();
         a.license = if item.unfree { "Not free: you accept its license when installing".into() } else { a.license };
         a.popular = item.tier == Tier::Welcome && looks.is_some();
-        if have.has(&item) {
+        a.desktop = desktop(&group);
+        a.nyx = !item.nyx.is_empty();
+        a.built_in = item.tier == Tier::Base;
+        a.scope = if item.scope() == nyx_catalog::Scope::System { "everyone" } else { "you" }.into();
+        a.keywords = item.names();
+        a.also = looks.map(|l| vec![(FLATHUB.to_string(), l.package.clone())]).unwrap_or_default();
+        a.also.extend(item.packages.iter().map(|p| (NIXPKGS.to_string(), p.clone())));
+        if let Some(name) = item.nyx.first().filter(|_| looks.is_none()) {
+            let id = nyx_app_id(name);
+            a.icon = id.clone();
+            a.desktop_id = format!("{id}.desktop");
+        }
+        a.group = (group.id.clone(), group.name.clone());
+        a.section = group.section.clone();
+        if a.built_in || have.has(item) {
             installed.insert(item.id.clone(), Installed { name: item.id.clone(), version: String::new(), stamp: String::new() });
         }
         apps.push(a);
     }
     for &(attr, category) in PICKS {
-        let mut a = art(attr).cloned().unwrap_or_else(|| App { name: attr.into(), desktop: true, ..Default::default() });
+        let looks = art(attr);
+        let mut a = looks.cloned().unwrap_or_else(|| App { name: attr.into(), desktop: true, ..Default::default() });
         a.package = attr.into();
         a.source = NIXPKGS.into();
         a.category = category.into();
         a.popular = true;
+        a.scope = "you".into();
+        a.keywords = vec![attr.to_lowercase()];
+        a.also = looks.map(|l| vec![(FLATHUB.to_string(), l.package.clone())]).unwrap_or_default();
         apps.push(a);
     }
     for a in &mut flathub {
         a.source = FLATHUB.into();
         a.popular = ART.iter().any(|(_, id)| *id == a.package);
+        a.scope = "you".into();
     }
     apps.extend(flathub);
 
@@ -311,7 +333,72 @@ pub fn load(cache: &Path, refresh: bool) -> Result<Catalog> {
             .into(),
         updates,
         warning,
+        groups,
+        bundles: sw
+            .presets
+            .iter()
+            .map(|p| catalog::Bundle { id: p.id.clone(), name: p.name.clone(), summary: p.summary.clone(), items: p.items.clone() })
+            .collect(),
     })
+}
+
+/// The catalog's categories in its order, each with its section's id and name.
+fn groups(sw: &Software) -> Vec<catalog::Group> {
+    sw.categories
+        .iter()
+        .map(|c| catalog::Group {
+            id: c.id.clone(),
+            name: c.name.clone(),
+            section: (
+                c.section.clone(),
+                sw.sections.iter().find(|s| s.id == c.section).map(|s| s.name.clone()).unwrap_or_default(),
+            ),
+        })
+        .collect()
+}
+
+/// Whether a catalog category holds apps with a window, rather than terminal tools,
+/// toolchains, services or coding agents.
+fn desktop(group: &catalog::Group) -> bool {
+    !matches!(group.section.0.as_str(), "cli" | "toolchains" | "infrastructure")
+        && !matches!(group.id.as_str(), "coding-agents" | "local-models")
+}
+
+/// A Nyx app's application ID, which names its launcher and icon (`media-player` is
+/// `io.github.design_nexus.nyx.MediaPlayer`).
+fn nyx_app_id(name: &str) -> String {
+    let camel: String = name
+        .split('-')
+        .map(|w| {
+            let mut c = w.chars();
+            c.next().map(|f| f.to_uppercase().chain(c).collect::<String>()).unwrap_or_default()
+        })
+        .collect();
+    format!("io.github.design_nexus.nyx.{camel}")
+}
+
+/// What `nyx update`'s last check found (`$XDG_CACHE_HOME/nyx/update-status.json`, kept
+/// by nyx-system): when it ran, in seconds since the epoch, and each update but firmware.
+pub fn checked_updates() -> Option<(i64, Vec<Change>)> {
+    let cache = std::env::var_os("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".cache"));
+    let v: serde_json::Value = serde_json::from_str(&fs::read_to_string(cache.join("nyx/update-status.json")).ok()?).ok()?;
+    let text = |v: &serde_json::Value| v.as_str().map(String::from);
+    let items = v["status"]["available"]
+        .as_array()?
+        .iter()
+        .filter(|i| !i["how"].as_str().unwrap_or("").starts_with("firmware"))
+        .map(|i| Change {
+            name: text(&i["name"]).unwrap_or_default(),
+            old: text(&i["from"]),
+            new: text(&i["to"]),
+            source: text(&i["how"]).unwrap_or_default(),
+            bytes: 0,
+        })
+        .collect();
+    Some((v["time"].as_i64().unwrap_or(0), items))
 }
 
 /// nixpkgs packages matching `query` (`nix search`), for anything not in the catalog.
@@ -678,5 +765,19 @@ mod tests {
         for (attr, _) in PICKS {
             assert!(!sw.items.iter().any(|i| i.packages.iter().any(|p| p == attr)), "{attr} is in the catalog too");
         }
+        let groups = groups(&sw);
+        for item in &sw.items {
+            let group = groups.iter().find(|g| g.id == item.category).unwrap_or_else(|| panic!("{} has no category", item.id));
+            assert!(!group.section.1.is_empty(), "{}'s section has no name", group.id);
+        }
+        let of = |id: &str| groups.iter().find(|g| g.id == id).unwrap();
+        assert!(desktop(of("browsers")) && desktop(of("nyx-tools")) && desktop(of("agent-apps")));
+        assert!(!desktop(of("cli-tools")) && !desktop(of("languages")) && !desktop(of("containers")) && !desktop(of("coding-agents")));
+    }
+
+    #[test]
+    fn nyx_app_ids() {
+        assert_eq!(nyx_app_id("media-player"), "io.github.design_nexus.nyx.MediaPlayer");
+        assert_eq!(nyx_app_id("pdf"), "io.github.design_nexus.nyx.Pdf");
     }
 }

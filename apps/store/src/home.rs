@@ -1,27 +1,32 @@
 //! Home: the spotlight, the collections and shelves of apps, each section in its own
-//! colour from the theme's swatches.
+//! colour from the theme's swatches. On NyxOS, the Nyx apps and the catalog's bundles too.
 use super::*;
+use nyx_store::nix::NYXOS;
 
 pub(super) fn render(catalog: &Catalog) {
-    let mut seen = BTreeSet::new();
-    let apps: Vec<App> = catalog
-        .apps
-        .iter()
-        .filter(|a| a.desktop && repositories::official(&a.source) && source_match(a))
-        .filter(|a| seen.insert(a.package.clone()))
+    let nix = nyx_store::nix::active();
+    let apps: Vec<App> = browsable(catalog)
+        .into_iter()
+        .filter(|a| a.desktop && !a.built_in && (repositories::official(&a.source) || a.source == NYXOS))
         .cloned()
         .collect();
     if apps.is_empty() {
-        text("Select All sources to discover desktop apps.");
+        text("The catalog has no apps yet. Refresh it with Ctrl+R.");
         return;
     }
     featured(&apps);
     collections(&apps);
-    let picks: Vec<App> = ["firefox", "libreoffice-fresh", "keepassxc", "vlc", "signal-desktop", "obsidian"]
-        .iter()
-        .filter_map(|name| apps.iter().find(|a| a.package == *name).cloned())
-        .collect();
-    let from = if nyx_store::nix::active() { "A few great places to start." } else { "A few great places to start, handpicked from Arch." };
+    if nix {
+        nyx_shelf(catalog);
+        bundles(catalog);
+    }
+    let picks: Vec<App> =
+        ["firefox", "libreoffice-fresh", "libreoffice", "keepassxc", "vlc", "signal-desktop", "signal", "obsidian"]
+            .iter()
+            .filter_map(|name| apps.iter().find(|a| a.package == *name).cloned())
+            .take(6)
+            .collect();
+    let from = if nix { "A few great places to start." } else { "A few great places to start, handpicked from Arch." };
     shelf("Everyday essentials", from, "starred-symbolic", "accent", &picks, None);
     for (category, title, copy) in [
         ("Graphics", "Make something extraordinary", "From the first sketch to the final frame."),
@@ -32,19 +37,124 @@ pub(super) fn render(catalog: &Catalog) {
         let mut selection: Vec<App> = apps.iter().filter(|a| a.category == category).cloned().collect();
         selection.sort_by_key(|a| !a.popular);
         selection.truncate(6);
-        shelf(title, copy, category_icon(category), theme::tone(category), &selection, Some(category));
+        let see_all = SeeAll(format!("See all {}", category.to_lowercase()), Box::new(move || category_page(category)));
+        shelf(title, copy, category_icon(category), theme::tone(category), &selection, Some(see_all));
     }
+}
+
+/// Made for NyxOS: the Nyx apps not installed yet first, and See all for the Nyx Apps page.
+fn nyx_shelf(catalog: &Catalog) {
+    let mut apps: Vec<App> = catalog.apps.iter().filter(|a| a.nyx && !a.built_in).cloned().collect();
+    apps.sort_by_key(|a| (a.installed.is_some(), !a.popular));
+    apps.truncate(6);
+    let see_all = SeeAll("See all Nyx apps".into(), Box::new(|| navigate("nyx")));
+    shelf("Made for NyxOS", "The Nyx suite: one design, working together.", "view-app-grid-symbolic", "accent", &apps, Some(see_all));
+}
+
+/// The catalog's bundles: apps for one kind of work, reviewed and installed together.
+fn bundles(catalog: &Catalog) {
+    if catalog.bundles.is_empty() {
+        return;
+    }
+    shelf_head("Bundles", "Everything for one kind of work, installed in one go.", "folder-download-symbolic", "accent", None);
+    let grid = tile_grid();
+    for bundle in &catalog.bundles {
+        let missing = catalog
+            .apps
+            .iter()
+            .filter(|a| a.source == NYXOS && a.installed.is_none() && bundle.items.contains(&a.package))
+            .count();
+        let line = match missing {
+            0 => format!("{} apps · all installed", bundle.items.len()),
+            n => format!("{} apps · {n} to install", bundle.items.len()),
+        };
+        let tone = match bundle.id.as_str() {
+            "everyday" => "amber",
+            "developer" => "teal",
+            "ai-developer" => "violet",
+            "homelab" => "blue",
+            _ => "graphite",
+        };
+        let b = bundle.clone();
+        let t = tile(&bundle.name, &line, "folder-download-symbolic", tone, move || bundle_dialog(&b));
+        t.set_tooltip_text(Some(&bundle.summary));
+        grid.insert(&t, -1);
+    }
+    ui().body.append(&grid);
+}
+
+/// A bundle's apps, those installed marked, and Install for the rest: one review.
+fn bundle_dialog(bundle: &catalog::Bundle) {
+    let u = ui();
+    let catalog = u.catalog.borrow();
+    let Some(c) = catalog.as_ref() else { return };
+    let (dialog, card) = widgets::dialog(&bundle.name, 560);
+    dialog.set_default_height(560);
+    let note = widgets::label(&bundle.summary, "dim");
+    note.set_wrap(true);
+    note.set_xalign(0.0);
+    card.append(&note);
+    let list = widgets::vbox(0);
+    list.add_css_class("group-list");
+    let mut missing = Vec::new();
+    for id in &bundle.items {
+        let Some(app) = c.apps.iter().find(|a| a.source == NYXOS && a.package == *id) else { continue };
+        let state = widgets::label("Installed", "source-tag");
+        list.append(&widgets::row(&app.name, &app.summary, app.installed.is_some().then(|| state.upcast_ref())));
+        if app.installed.is_none() {
+            missing.push(id.clone());
+        }
+    }
+    let scroll = gtk::ScrolledWindow::builder()
+        .child(&list)
+        .vexpand(true)
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .min_content_height(200)
+        .max_content_height(420)
+        .propagate_natural_height(true)
+        .build();
+    card.append(&scroll);
+    let actions = widgets::hbox(8);
+    actions.set_halign(gtk::Align::End);
+    let d = dialog.clone();
+    let close = button("Not now", move || d.close());
+    actions.append(&close);
+    let label = match missing.len() {
+        0 => "All installed".to_string(),
+        1 => "Install 1 app".to_string(),
+        n => format!("Install {n} apps"),
+    };
+    let d = dialog.clone();
+    let install = button(&label, move || {
+        d.close();
+        start_request(Request::Install { source: NYXOS.into(), packages: missing.clone() });
+    });
+    install.add_css_class("suggested-action");
+    install.set_sensitive(label != "All installed" && !u.busy.get());
+    actions.append(&install);
+    card.append(&actions);
+    dialog.present();
+    close.grab_focus();
 }
 
 fn category_icon(category: &str) -> &'static str {
     catalog::CATEGORIES.iter().find(|(c, _)| *c == category).map(|(_, i)| *i).unwrap_or("view-app-grid-symbolic")
 }
 
-/// A section of apps: its chip, title and note, See all for a category, then the apps.
-fn shelf(title: &str, note: &str, icon: &str, tone: &str, apps: &[App], see_all: Option<&'static str>) {
+/// A shelf's See all: its tooltip and where it goes.
+struct SeeAll(String, Box<dyn Fn()>);
+
+/// A section of apps: its heading, then the apps.
+fn shelf(title: &str, note: &str, icon: &str, tone: &str, apps: &[App], see_all: Option<SeeAll>) {
     if apps.is_empty() {
         return;
     }
+    shelf_head(title, note, icon, tone, see_all);
+    grid(apps);
+}
+
+/// A shelf's heading: its chip, title and note, and See all.
+fn shelf_head(title: &str, note: &str, icon: &str, tone: &str, see_all: Option<SeeAll>) {
     let header = widgets::hbox(12);
     header.add_css_class("shelf-head");
     header.append(&tone_chip(icon, tone, 30));
@@ -60,14 +170,13 @@ fn shelf(title: &str, note: &str, icon: &str, tone: &str, apps: &[App], see_all:
     n.set_wrap(true);
     words.append(&n);
     header.append(&words);
-    if let Some(category) = see_all {
-        let more = widgets::bar_button("go-next-symbolic", &format!("See all {}", category.to_lowercase()));
-        more.connect_clicked(move |_| category_page(category));
+    if let Some(SeeAll(tip, go)) = see_all {
+        let more = widgets::bar_button("go-next-symbolic", &tip);
+        more.connect_clicked(move |_| go());
         more.set_valign(gtk::Align::Center);
         header.append(&more);
     }
     ui().body.append(&header);
-    grid(apps);
 }
 
 fn category_page(category: &str) {
@@ -125,7 +234,7 @@ fn featured(apps: &[App]) {
         action.set_halign(gtk::Align::Start);
         words.append(&action);
         let tag = widgets::label(
-            &format!("{}{}", app.source, match (app.installed.is_some(), nyx_store::nix::active()) {
+            &format!("{}{}", source_name(&app.source), match (app.installed.is_some(), nyx_store::nix::active()) {
                 (true, _) => " · In your library",
                 (false, true) => " · Available",
                 (false, false) => " · Available on Arch",

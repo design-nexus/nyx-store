@@ -7,4 +7,5 @@ pub mod nix;
 pub mod packages;
 pub mod provenance;
 pub mod repositories;
+pub mod search;
 pub mod transaction;
