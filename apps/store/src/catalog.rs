@@ -159,11 +159,24 @@ pub fn parse(xml: &str) -> Result<Vec<App>> {
             .and_then(|n| n.text())
             .unwrap_or("")
             .to_string();
+        let developer = Some(text("developer_name")).filter(|d| !d.is_empty()).unwrap_or_else(|| {
+            c.children()
+                .find(|n| n.has_tag_name("developer"))
+                .and_then(|d| {
+                    d.children()
+                        .find(|n| n.has_tag_name("name") && n.attribute(("http://www.w3.org/XML/1998/namespace", "lang")).is_none())
+                })
+                .and_then(|n| n.text())
+                .unwrap_or("")
+                .trim()
+                .to_string()
+        });
         apps.push(App {
             package,
             name: text("name"),
             summary: text("summary"),
             description,
+            developer,
             category: category(&cats),
             icon,
             website,
@@ -182,7 +195,7 @@ fn metadata(cache: &Path, refresh: bool, h: &alpm::Alpm) -> Result<Vec<App>> {
     db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL")?;
     db.execute_batch("CREATE TABLE IF NOT EXISTS metadata (package TEXT PRIMARY KEY, value TEXT NOT NULL)")?;
     if refresh
-        || db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))? < 2
+        || db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))? < 3
         || db.query_row("SELECT count(*) FROM metadata", [], |r| r.get::<_, i64>(0))? == 0
     {
         let mut xmls = Vec::new();
@@ -258,7 +271,7 @@ fn metadata(cache: &Path, refresh: bool, h: &alpm::Alpm) -> Result<Vec<App>> {
             }
         }
         tx.commit()?;
-        db.pragma_update(None, "user_version", 2)?;
+        db.pragma_update(None, "user_version", 3)?;
     }
     let mut stmt = db.prepare("SELECT value FROM metadata")?;
     let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
@@ -275,8 +288,10 @@ pub struct Catalog {
     pub warning: String,
     /// NyxOS: the catalog's categories in its order, each with its section.
     pub groups: Vec<Group>,
-    /// NyxOS: the catalog's presets.
+    /// The NyxOS catalog's presets.
     pub bundles: Vec<Bundle>,
+    /// Arch: what the Nyx apps' installer and uninstaller can do.
+    pub suite: crate::suite::Support,
 }
 
 /// A NyxOS catalog category and the section it's in, as (id, name).
@@ -294,6 +309,23 @@ pub struct Bundle {
     pub name: String,
     pub summary: String,
     pub items: Vec<String>,
+    /// Arch: what its items install here.
+    pub arch: Vec<BundleItem>,
+    /// Arch: its items with nothing to install here, by name.
+    pub left_out: Vec<String>,
+}
+
+/// Arch: a preset's item as it installs here.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct BundleItem {
+    pub id: String,
+    pub name: String,
+    /// (source, package): a repository's, the AUR's (`aur`) or a Nyx app.
+    pub packages: Vec<(String, String)>,
+    /// Its nixpkgs attributes Arch has no package for.
+    pub missing: Vec<String>,
+    /// The services it turns on in NyxOS, which Store doesn't turn on here.
+    pub services: Vec<String>,
 }
 
 pub fn load(cache: &Path, refresh: bool) -> Result<Catalog> {
@@ -304,7 +336,7 @@ pub fn load(cache: &Path, refresh: bool) -> Result<Catalog> {
     let h = packages::handle(cache, false, refresh)?;
     let installed = packages::installed(&h);
     let sources = crate::provenance::Provenance::sources(&packages::provenance_path())?;
-    let (data, warning) = match metadata(cache, refresh, &h) {
+    let (data, mut warning) = match metadata(cache, refresh, &h) {
         Ok(a) => (a, String::new()),
         Err(e) => (metadata(cache, false, &h).unwrap_or_default(), format!("App descriptions could not refresh: {e}")),
     };
@@ -322,6 +354,10 @@ pub fn load(cache: &Path, refresh: bool) -> Result<Catalog> {
         if a.icon == package {
             a.icon = icon.into();
         }
+        // The editorial name and line: AppStream's are often a component's
+        // ("LibreOffice Writer") or too long to read on a card.
+        a.name = name.into();
+        a.summary = summary.into();
         a.popular = true;
         a.category = category.into();
     }
@@ -392,6 +428,15 @@ pub fn load(cache: &Path, refresh: bool) -> Result<Catalog> {
                 enrich_launcher(p, a);
             }
     }
+    let nyx = crate::suite::load(cache, refresh, |name| {
+        packages::preferred(&h, name)
+            .or_else(|| h.syncdbs().find_satisfier(name))
+            .and_then(|p| Some((p.db()?.name().to_string(), p.name().to_string())))
+    });
+    apps.extend(nyx.apps);
+    if !nyx.warning.is_empty() {
+        warning = [warning, nyx.warning].into_iter().filter(|w| !w.is_empty()).collect::<Vec<_>>().join(" ");
+    }
     apps.sort_by_key(|a| a.name.to_lowercase());
     for repo in crate::repositories::custom()? {
         if !repo.enabled {
@@ -401,7 +446,18 @@ pub fn load(cache: &Path, refresh: bool) -> Result<Catalog> {
     if !repositories.iter().any(|r| r.name == "blackarch") {
         repositories.push(crate::repositories::blackarch());
     }
-    Ok(Catalog { apps, installed, sources, candidates, repositories, updates, warning, groups: Vec::new(), bundles: Vec::new() })
+    Ok(Catalog {
+        apps,
+        installed,
+        sources,
+        candidates,
+        repositories,
+        updates,
+        warning,
+        groups: nyx.groups,
+        bundles: nyx.bundles,
+        suite: nyx.support,
+    })
 }
 
 fn enrich_launcher(p: &alpm::Package, app: &mut App) {

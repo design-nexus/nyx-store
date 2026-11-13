@@ -96,7 +96,7 @@ pub fn active() -> bool {
 }
 
 /// Store's category for a catalog category.
-fn category(id: &str) -> &'static str {
+pub(crate) fn category(id: &str) -> &'static str {
     match id {
         "browsers" | "chat" | "remote" | "nyx-communication" => "Internet",
         "office" | "nyx-productivity" | "nyx-essentials" | "nyx-tools" => "Productivity",
@@ -337,13 +337,20 @@ pub fn load(cache: &Path, refresh: bool) -> Result<Catalog> {
         bundles: sw
             .presets
             .iter()
-            .map(|p| catalog::Bundle { id: p.id.clone(), name: p.name.clone(), summary: p.summary.clone(), items: p.items.clone() })
+            .map(|p| catalog::Bundle {
+                id: p.id.clone(),
+                name: p.name.clone(),
+                summary: p.summary.clone(),
+                items: p.items.clone(),
+                ..Default::default()
+            })
             .collect(),
+        suite: Default::default(),
     })
 }
 
 /// The catalog's categories in its order, each with its section's id and name.
-fn groups(sw: &Software) -> Vec<catalog::Group> {
+pub(crate) fn groups(sw: &Software) -> Vec<catalog::Group> {
     sw.categories
         .iter()
         .map(|c| catalog::Group {
@@ -366,7 +373,7 @@ fn desktop(group: &catalog::Group) -> bool {
 
 /// A Nyx app's application ID, which names its launcher and icon (`media-player` is
 /// `io.github.design_nexus.nyx.MediaPlayer`).
-fn nyx_app_id(name: &str) -> String {
+pub(crate) fn nyx_app_id(name: &str) -> String {
     let camel: String = name
         .split('-')
         .map(|w| {

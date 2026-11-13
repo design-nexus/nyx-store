@@ -6,6 +6,9 @@ pub struct App {
     pub name: String,
     pub summary: String,
     pub description: String,
+    /// Who makes it (AppStream's developer name).
+    #[serde(default)]
+    pub developer: String,
     pub category: String,
     pub icon: String,
     pub screenshots: Vec<String>,
@@ -44,6 +47,12 @@ impl App {
     /// Whether Store offers to remove it: not part of the system, not built into NyxOS.
     pub fn removable(&self) -> bool {
         !self.built_in && !protected(&self.package)
+    }
+
+    /// Arch: a Nyx app's name for the suite's installer (`nyx-media-player` is
+    /// `media-player`).
+    pub fn suite_name(&self) -> Option<&str> {
+        (self.source == crate::suite::SUITE).then(|| self.package.strip_prefix("nyx-")).flatten()
     }
 }
 
@@ -85,6 +94,10 @@ pub enum Request {
     Repository { repository: crate::repositories::Repository },
     TrustKey { fingerprint: String },
     AurInstall { artifacts: Vec<String>, base: String, commit: String },
+    /// Arch: Nyx apps by name (`mail`), with the suite's published installer or
+    /// uninstaller (`change`: `install`, `update` or `remove`). They run as the user, never in the
+    /// helper.
+    NyxApps { change: String, apps: Vec<String> },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -281,6 +281,9 @@ pub fn run(request: Request, input: &mut impl BufRead) -> Result<()> {
 }
 
 pub fn start(request: Request, send: async_channel::Sender<Event>, confirmation: std::sync::mpsc::Receiver<Option<Plan>>) {
+    if matches!(request, Request::NyxApps { .. }) {
+        return crate::suite::start(request, send, confirmation);
+    }
     if crate::nix::active() {
         return crate::nix::start(request, send, confirmation);
     }

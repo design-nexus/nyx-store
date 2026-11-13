@@ -1,3 +1,5 @@
+#[path = "app_page.rs"]
+mod app_page;
 #[path = "blackarch_dialog.rs"]
 mod blackarch_dialog;
 #[path = "home.rs"]
@@ -21,20 +23,31 @@ use std::{
 const PAGES: &[(&str, &str, &str)] = &[
     ("home", "Home", "go-home-symbolic"),
     // NyxOS only; its icon is the system logo.
-    ("nyx", "Nyx Apps", ""),
-    ("categories", "Categories", "view-grid-symbolic"),
+    ("nyx", "Nyx apps", ""),
+    ("categories", "All categories", "view-grid-symbolic"),
     ("installed", "Installed", "emblem-default-symbolic"),
     ("updates", "Updates", "software-update-available-symbolic"),
-    ("repositories", "Repositories", "network-server-symbolic"),
+    ("repositories", "Sources", "network-server-symbolic"),
 ];
+/// The kinds of app the sidebar lists under Categories, as (name, catalog category, icon).
+const KINDS: &[(&str, &str, &str)] = &[
+    ("Create", "Graphics", "applications-graphics-symbolic"),
+    ("Work", "Productivity", "document-edit-symbolic"),
+    ("Play", "Games", "input-gaming-symbolic"),
+    ("Develop", "Development", "utilities-terminal-symbolic"),
+];
+/// Window widths where the layout changes: the icon rail below the first, the
+/// spotlight's screenshot from the second.
+const RAIL_WIDTH: i32 = nyx_ui::sidebar::NARROW_WIDTH;
+const WIDE_WIDTH: i32 = 1180;
 pub const SHORTCUTS: &[(&[&str], &str)] = &[
     (&["Ctrl", "F"], "Search apps"),
     (&["Ctrl", "B"], "Collapse sidebar"),
-    (&["Alt", "Left"], "Back to Home"),
+    (&["Alt", "Left"], "Back from an app, or to Home"),
     (&["Ctrl", "R"], "Refresh catalog"),
     (&["Ctrl", ","], "Settings"),
     (&["Ctrl", "Shift", "P"], "Command palette"),
-    (&["Esc"], "Close panel or clear search"),
+    (&["Esc"], "Close an app, a panel or the search"),
     (&["F1"], "Keyboard shortcuts"),
     (&["Ctrl", "Q"], "Close Store"),
 ];
@@ -43,13 +56,22 @@ struct Ui {
     window: gtk::ApplicationWindow,
     overlay: gtk::Overlay,
     nav: gtk::Box,
-    header: chrome::AppHeader,
-    nav_buttons: Vec<(String, gtk::Button)>,
-    /// A count beside a sidebar item (the updates available).
-    nav_badges: Vec<(String, gtk::Label)>,
+    /// The header's app name, hidden beside the icon rail.
+    header_title: Option<gtk::Widget>,
+    nav_items: Vec<(String, nyx_ui::sidebar::NavItem)>,
+    /// Under the sidebar: how many apps the catalog has and when it was checked.
+    foot: gtk::Label,
     body: gtk::Box,
     scroll: gtk::ScrolledWindow,
     search: gtk::SearchEntry,
+    search_hint: gtk::Label,
+    /// The app whose page is open over the page it was opened from, and where that
+    /// page was scrolled to.
+    detail: RefCell<Option<App>>,
+    detail_scroll: Cell<f64>,
+    /// The layout for the window's width: 0 beside the icon rail, 1 without the
+    /// spotlight's screenshot, 2 with it.
+    tier: Cell<u8>,
     /// The search's source button: `None` for all, `nyx` for Nyx apps, else a source.
     /// It only filters search results and resets when the search is cleared.
     search_source: RefCell<Option<String>>,
@@ -83,15 +105,23 @@ struct Ui {
     queue: RefCell<VecDeque<Request>>,
     /// A launcher's desktop id from `--remove`, until the catalog has loaded.
     pending_remove: RefCell<Option<String>>,
+    /// A package from `--app`, until the catalog has loaded.
+    pending_app: RefCell<Option<String>>,
 }
 thread_local! { static UI: RefCell<Option<Rc<Ui>>> = const { RefCell::new(None) }; }
 fn ui() -> Rc<Ui> {
     UI.with(|u| u.borrow().as_ref().unwrap().clone())
 }
 
-pub fn present(app: &gtk::Application, section: Option<&str>, query: Option<&str>, remove: Option<&str>) {
+pub fn present(
+    application: &gtk::Application,
+    section: Option<&str>,
+    query: Option<&str>,
+    remove: Option<&str>,
+    app: Option<&str>,
+) {
     if UI.with(|u| u.borrow().is_none()) {
-        build(app);
+        build(application);
         let cache = nyx_core::paths::cache_dir().join("catalog-refreshed");
         let p = prefs::get();
         let due = p.catalog_refresh == "startup" || (p.catalog_refresh == "daily" &&
@@ -122,6 +152,22 @@ pub fn present(app: &gtk::Application, section: Option<&str>, query: Option<&str
         if u.catalog.borrow().is_some() && !u.loading.get() {
             offer_removal();
         }
+    } else if let Some(package) = app {
+        *u.pending_app.borrow_mut() = Some(package.to_string());
+        if u.catalog.borrow().is_some() && !u.loading.get() {
+            offer_app();
+        }
+    }
+}
+
+/// `--app`: the page of the catalog's app with this package name.
+fn offer_app() {
+    let u = ui();
+    let Some(package) = u.pending_app.borrow_mut().take() else { return };
+    let found = u.catalog.borrow().as_ref().and_then(|c| browsable(c).into_iter().find(|a| a.package == package).cloned());
+    match found {
+        Some(app) => details(app),
+        None => notice(&format!("The catalog has no app called {package}.")),
     }
 }
 
@@ -171,38 +217,56 @@ fn build(app: &gtk::Application) {
     window.add_css_class("store-window");
     let nav = widgets::vbox(0);
     nav.add_css_class("settings-navigation");
+    nav.add_css_class("sidebar");
     nav.set_hexpand(false);
-    let list = widgets::vbox(0);
+    let list = widgets::vbox(1);
     list.set_hexpand(false);
-    let mut nav_buttons = Vec::new();
-    let mut nav_badges = Vec::new();
-    for &(id, title, icon) in PAGES.iter().filter(|p| page_available(p.0)) {
-        let button = gtk::Button::new();
-        button.add_css_class("nav-item");
-        button.set_tooltip_text(Some(title));
-        let row = widgets::hbox(12);
-        if icon.is_empty() {
-            row.append(&widgets::logo(16));
-        } else {
-            row.append(&gtk::Image::from_icon_name(icon));
+    let mut nav_items = Vec::new();
+    let mut entry = |id: &str, icon: &str, title: &str| {
+        let item = nyx_ui::sidebar::nav_item(if icon.is_empty() { "view-app-grid-symbolic" } else { icon }, title, title);
+        if icon.is_empty()
+            && let Some(row) = item.button.child().and_downcast::<gtk::Box>()
+            && let Some(image) = row.first_child()
+        {
+            row.remove(&image);
+            row.prepend(&widgets::logo(16));
         }
-        let label = widgets::label(title, "nav-label");
-        label.add_css_class("compact-hide");
-        label.set_hexpand(true);
-        label.set_ellipsize(gtk::pango::EllipsizeMode::End);
-        label.set_xalign(0.0);
-        row.append(&label);
-        let badge = widgets::label("", "nav-badge");
-        badge.add_css_class("compact-hide");
-        badge.set_visible(false);
-        badge.set_valign(gtk::Align::Center);
-        row.append(&badge);
-        button.set_child(Some(&row));
-        button.connect_clicked(move |_| navigate(id));
-        list.append(&button);
-        nav_buttons.push((id.into(), button));
-        nav_badges.push((id.into(), badge));
+        let target = id.to_string();
+        item.button.connect_clicked(move |_| navigate(&target));
+        list.append(&item.button);
+        nav_items.push((id.to_string(), item));
+    };
+    let page = |id: &str| PAGES.iter().find(|p| p.0 == id).map(|p| (p.2, p.1)).unwrap_or_default();
+    for id in ["home", "nyx"].into_iter().filter(|id| page_available(id)) {
+        let (icon, title) = page(id);
+        entry(id, icon, title);
     }
+    nav_group(&list, "Categories", nyx_ui::sidebar::ACCENT_SECTION);
+    for &(name, category, icon) in KINDS {
+        entry(&format!("cat:{category}"), icon, name);
+    }
+    let (icon, title) = page("categories");
+    entry("categories", icon, title);
+    nav_group(&list, "This computer", "swatch-green");
+    for id in ["installed", "updates", "repositories"].into_iter().filter(|id| page_available(id)) {
+        let (icon, title) = page(id);
+        entry(id, icon, title);
+    }
+    // The catalog's status; clicking it refreshes the catalog.
+    let foot_row = gtk::Button::new();
+    foot_row.add_css_class("store-foot");
+    foot_row.add_css_class("compact-hide");
+    foot_row.set_tooltip_text(Some("Refresh catalog (Ctrl+R)"));
+    foot_row.connect_clicked(|_| refresh(true));
+    let foot_content = widgets::hbox(6);
+    let checked = gtk::Image::from_icon_name("emblem-default-symbolic");
+    checked.add_css_class("foot-ok");
+    foot_content.append(&checked);
+    let foot = widgets::label("Loading apps…", "foot-text");
+    foot.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    foot_content.append(&foot);
+    foot_row.set_child(Some(&foot_content));
+    list.append(&foot_row);
     let nav_scroll = gtk::ScrolledWindow::builder()
         .hexpand(false)
         .vexpand(true)
@@ -215,7 +279,7 @@ fn build(app: &gtk::Application) {
     column.add_css_class("settings-content");
     column.set_hexpand(true);
     let search = gtk::SearchEntry::new();
-    search.set_placeholder_text(Some(&format!("{}  (Ctrl+F)", search_label())));
+    search.set_placeholder_text(Some(search_label()));
     search.add_css_class("bar-search");
     search.set_width_chars(SEARCH_WIDE);
     search.update_property(&[gtk::accessible::Property::Label(search_label())]);
@@ -233,7 +297,7 @@ fn build(app: &gtk::Application) {
     body.add_css_class("settings-page");
     body.set_hexpand(true);
     let scroll = gtk::ScrolledWindow::builder()
-        .child(&body)
+        .child(&nyx_ui::clamp::Clamp::new(&body, 1000))
         .vexpand(true)
         .hexpand(true)
         .hscrollbar_policy(gtk::PolicyType::Never)
@@ -242,13 +306,21 @@ fn build(app: &gtk::Application) {
     column.append(&scroll);
 
     // ----- Header -----
-    // The app and the page, the sidebar toggle; the search in the middle; what the
-    // catalog holds or the operation under way, Refresh and Settings at the end.
+    // The app and the sidebar toggle; the search in the middle; the operation under
+    // way and Settings at the end.
     let header = chrome::app_header(&window, "system-software-install-symbolic", "Store");
     let collapse = widgets::bar_button("sidebar-show-symbolic", "Collapse the sidebar (Ctrl+B)");
     collapse.connect_clicked(|_| toggle_sidebar());
     header.start.append(&collapse);
-    header.center.append(&search);
+    let search_box = gtk::Overlay::new();
+    search_box.set_child(Some(&search));
+    let search_hint = widgets::label("Ctrl F", "search-key");
+    search_hint.set_halign(gtk::Align::End);
+    search_hint.set_valign(gtk::Align::Center);
+    search_hint.set_margin_end(10);
+    search_hint.set_can_target(false);
+    search_box.add_overlay(&search_hint);
+    header.center.append(&search_box);
     header.end.set_spacing(4);
     let status = widgets::label("Loading apps…", "header-status");
     status.set_ellipsize(gtk::pango::EllipsizeMode::End);
@@ -261,10 +333,8 @@ fn build(app: &gtk::Application) {
     cancel_button.connect_clicked(|_| cancel_operation());
     cancel_button.set_visible(false);
     header.end.append(&cancel_button);
-    let refresh_button = widgets::bar_button("view-refresh-symbolic", "Refresh catalog (Ctrl+R)");
-    refresh_button.connect_clicked(|_| refresh(true));
-    header.end.append(&refresh_button);
     header.end.append(&chrome::settings_button(settings));
+    let header_title = find_class(header.root.upcast_ref(), "app-title");
     let frame = nyx_ui::frame::AppFrame::new(&header.root);
     frame.root.add_css_class("store-frame");
     frame.set_sidebar(&nav);
@@ -280,16 +350,24 @@ fn build(app: &gtk::Application) {
     overlay.add_overlay(&toast_label);
     let p = prefs::get();
     let first = nyx_theme::start_page("home", &p.last_section);
+    let (first, first_category) = match first.strip_prefix("cat:") {
+        Some(category) => ("categories".to_string(), category.to_string()),
+        None => (first, String::new()),
+    };
     let u = Rc::new(Ui {
         window: window.clone(),
         overlay: overlay.clone(),
         nav: nav.clone(),
-        header,
-        nav_buttons,
-        nav_badges,
+        header_title,
+        nav_items,
+        foot,
         body,
         scroll,
         search: search.clone(),
+        search_hint,
+        detail: RefCell::new(None),
+        detail_scroll: Cell::new(0.0),
+        tier: Cell::new(u8::MAX),
         search_source: RefCell::new(None),
         include_packages: Cell::new(false),
         return_page: RefCell::new("home".into()),
@@ -303,7 +381,7 @@ fn build(app: &gtk::Application) {
         toast: toast_label,
         catalog: RefCell::new(None),
         page: RefCell::new(first),
-        category: RefCell::new(String::new()),
+        category: RefCell::new(first_category),
         aur: RefCell::new(Vec::new()),
         aur_updates: RefCell::new(Vec::new()),
         search_generation: Cell::new(0),
@@ -316,12 +394,15 @@ fn build(app: &gtk::Application) {
         pending_recipe: RefCell::new(None),
         queue: RefCell::new(VecDeque::new()),
         pending_remove: RefCell::new(None),
+        pending_app: RefCell::new(None),
     });
     UI.with(|v| *v.borrow_mut() = Some(u.clone()));
     search.connect_search_changed(|entry| {
         let u = ui();
         let page = u.page.borrow().clone();
+        u.search_hint.set_visible(entry.text().is_empty() && u.tier.get() > 0);
         if !entry.text().is_empty() {
+            u.detail.borrow_mut().take();
             if page != "search" {
                 *u.return_page.borrow_mut() = page;
                 *u.page.borrow_mut() = "search".into();
@@ -384,10 +465,18 @@ fn build(app: &gtk::Application) {
             gdk::Key::b if ctrl => toggle_sidebar(),
             gdk::Key::r if ctrl => refresh(true),
             gdk::Key::F1 => shortcuts(),
-            gdk::Key::Left if mods.contains(gdk::ModifierType::ALT_MASK) => navigate("home"),
+            gdk::Key::Left if mods.contains(gdk::ModifierType::ALT_MASK) => {
+                if ui().detail.borrow().is_some() {
+                    close_details();
+                } else {
+                    navigate("home");
+                }
+            }
             gdk::Key::Escape => {
                 if nyx_ui::settings_card::is_open() {
                     nyx_ui::settings_card::escape();
+                } else if ui().detail.borrow().is_some() {
+                    close_details();
                 } else {
                     let u = ui();
                     gtk::prelude::GtkWindowExt::set_focus(&u.window, None::<&gtk::Widget>);
@@ -447,35 +536,39 @@ fn toggle_sidebar() {
 fn responsive() {
     let u = ui();
     let width = if u.window.width() > 0 { u.window.width() } else { u.window.default_width() };
-    let compact = (width > 0 && width < 980) || prefs::get().sidebar_collapsed;
+    let narrow = width > 0 && width < RAIL_WIDTH;
+    let compact = narrow || prefs::get().sidebar_collapsed;
     nyx_ui::settings_card::fit(&u.window);
-    if compact {
-        u.nav.add_css_class("compact");
-    } else {
-        u.nav.remove_css_class("compact");
-    }
-    fn hide(widget: &gtk::Widget, compact: bool) {
-        if widget.has_css_class("nav-item")
-            && let Some(content) = widget.downcast_ref::<gtk::Button>().and_then(|b| b.child()) {
-                content.set_halign(if compact { gtk::Align::Center } else { gtk::Align::Fill });
+    if compact != u.nav.has_css_class("compact") || !u.nav.has_css_class("sized") {
+        u.nav.add_css_class("sized");
+        nyx_ui::sidebar::set_compact(&u.nav, compact);
+        fn rail_only(widget: &gtk::Widget, compact: bool) {
+            if widget.has_css_class("compact-show") {
+                widget.set_visible(compact);
             }
-        let mut c = widget.first_child();
-        while let Some(child) = c {
-            if child.has_css_class("compact-hide") {
-                child.set_visible(!compact);
+            let mut child = widget.first_child();
+            while let Some(c) = child {
+                rail_only(&c, compact);
+                child = c.next_sibling();
             }
-            hide(&child, compact);
-            c = child.next_sibling();
         }
+        rail_only(u.nav.upcast_ref(), compact);
     }
-    hide(u.nav.upcast_ref(), compact);
-    show_badges();
-    // Narrow windows (a tiled half-screen) get a shorter search and no catalog counts.
-    let narrow = width > 0 && width < 980;
     if narrow {
         u.body.add_css_class("narrow");
     } else {
         u.body.remove_css_class("narrow");
+    }
+    if let Some(title) = &u.header_title {
+        title.set_visible(!narrow);
+    }
+    u.search.set_width_chars(if narrow { SEARCH_NARROW } else { SEARCH_WIDE });
+    show_status();
+    let tier = if narrow { 0 } else if width < WIDE_WIDTH { 1 } else { 2 };
+    u.search_hint.set_visible(tier > 0 && u.search.text().is_empty());
+    if u.tier.replace(tier) != tier {
+        render();
+        return;
     }
     let columns = grid_columns();
     let mut child = u.body.first_child();
@@ -485,34 +578,89 @@ fn responsive() {
         }
         child = c.next_sibling();
     }
-    u.search.set_width_chars(if narrow { SEARCH_NARROW } else { SEARCH_WIDE });
-    u.search.set_placeholder_text(Some(&if narrow { "Search apps".to_string() } else { format!("{}  (Ctrl+F)", search_label()) }));
-    u.status.set_visible(!narrow || u.busy.get() || u.loading.get());
 }
-/// Nyx Apps is NyxOS's; Repositories is Arch's (NyxOS's sources need no managing).
+/// The header's status shows only while the catalog loads or an operation runs.
+fn show_status() {
+    let u = ui();
+    u.status.set_visible(u.busy.get() || u.loading.get());
+}
+/// The first widget under `root` with a style class.
+fn find_class(root: &gtk::Widget, class: &str) -> Option<gtk::Widget> {
+    let mut child = root.first_child();
+    while let Some(c) = child {
+        if c.has_css_class(class) {
+            return Some(c);
+        }
+        if let Some(found) = find_class(&c, class) {
+            return Some(found);
+        }
+        child = c.next_sibling();
+    }
+    None
+}
+/// A sidebar group's heading in its section's colour, and the icon rail's bar in the
+/// same colour.
+fn nav_group(list: &gtk::Box, title: &str, section: &str) {
+    let bar = gtk::Separator::new(gtk::Orientation::Horizontal);
+    bar.add_css_class("nav-divider");
+    bar.add_css_class("compact-show");
+    bar.add_css_class(&format!("section-{section}"));
+    bar.set_visible(false);
+    list.append(&bar);
+    let row = nyx_ui::sidebar::group_label(title, false);
+    nyx_ui::sidebar::set_section(&row, section);
+    list.append(&row);
+}
+/// Repositories is Arch's (NyxOS's sources need no managing).
 fn page_available(page: &str) -> bool {
     match page {
-        "nyx" => nyx_store::nix::active(),
         "repositories" => !nyx_store::nix::active(),
         _ => true,
     }
 }
-fn navigate(page: &str) {
-    if page == "settings" {
+/// Go to a sidebar item: a page, or `cat:<category>` for one kind of app.
+fn navigate(id: &str) {
+    if id == "settings" {
         settings();
         return;
     }
+    let (page, category) = match id.strip_prefix("cat:") {
+        Some(category) => ("categories", category),
+        None if id == "sources" => ("repositories", ""),
+        None => (id, ""),
+    };
     let u = ui();
+    u.detail.borrow_mut().take();
     *u.page.borrow_mut() = page.into();
-    u.category.borrow_mut().clear();
+    *u.category.borrow_mut() = category.into();
     if page != "search" {
         u.search.set_text("");
         u.search_source.borrow_mut().take();
         *u.page.borrow_mut() = page.into();
     }
-    prefs::update(|p| p.last_section = page.into());
+    prefs::update(|p| p.last_section = id.into());
     u.scroll.vadjustment().set_value(0.0);
     render();
+}
+/// Open an app's page over the page it's opened from.
+fn details(app: App) {
+    let u = ui();
+    if u.detail.borrow().is_none() {
+        u.detail_scroll.set(u.scroll.vadjustment().value());
+    }
+    *u.detail.borrow_mut() = Some(app);
+    render();
+    u.scroll.vadjustment().set_value(0.0);
+}
+/// Back from an app's page to where it was opened, scrolled as it was.
+fn close_details() {
+    let u = ui();
+    if u.detail.borrow_mut().take().is_none() {
+        return;
+    }
+    render();
+    let y = u.detail_scroll.get();
+    glib::idle_add_local_once(move || ui().scroll.vadjustment().set_value(y));
 }
 fn notice(message: &str) {
     let u = ui();
@@ -531,7 +679,7 @@ fn busy(on: bool) {
     u.cancel_button.set_visible(on && !u.committed.get());
     u.spinner.set_spinning(on || u.loading.get());
     u.progress.set_visible(on);
-    u.status.set_visible(on || !u.body.has_css_class("narrow"));
+    show_status();
     if on {
         u.progress.pulse();
     }
@@ -544,6 +692,7 @@ fn refresh(network: bool) {
     }
     u.spinner.start();
     u.status.set_text(if network { "Refreshing apps and repository metadata…" } else { "Loading apps…" });
+    show_status();
     notice("");
     let cache = nyx_core::paths::cache_dir();
     let bootstrap = !network && !cache.join("appstream.pkg.tar.zst").exists();
@@ -556,6 +705,7 @@ fn refresh(network: bool) {
             let u = ui();
             u.loading.set(false);
             u.spinner.set_spinning(u.busy.get());
+            show_status();
             match result {
                 Ok(catalog) => {
                     let warning = catalog.warning.clone();
@@ -571,10 +721,11 @@ fn refresh(network: bool) {
                         refresh(true);
                     } else {
                         offer_removal();
+                        offer_app();
                     }
                 }
                 Err(e) => {
-                    u.status.set_text("Catalog unavailable");
+                    u.foot.set_text("Catalog unavailable");
                     notice(&e);
                 }
             }
@@ -584,15 +735,14 @@ fn refresh(network: bool) {
 
 fn heading(title: &str, note: &str) {
     let u = ui();
-    let g = widgets::vbox(0);
-    g.add_css_class("settings-group");
-    let l = widgets::label(&title.to_uppercase(), "group-title");
-    l.set_xalign(0.0);
+    let g = widgets::vbox(2);
+    g.add_css_class("store-heading");
+    let l = widgets::label(title, "heading-title");
+    l.set_wrap(true);
     g.append(&l);
     if !note.is_empty() {
-        let n = widgets::label(note, "collection-note");
+        let n = widgets::label(note, "heading-note");
         n.set_wrap(true);
-        n.set_xalign(0.0);
         g.append(&n);
     }
     u.body.append(&g);
@@ -647,23 +797,28 @@ fn render() {
         *u.page.borrow_mut() = "home".into();
     }
     let page = u.page.borrow().clone();
-    for (id, b) in &u.nav_buttons {
-        if id == &page {
-            b.add_css_class("active");
-        } else {
-            b.remove_css_class("active");
-        }
+    let category = u.category.borrow().clone();
+    let detail = u.detail.borrow().clone();
+    let active = active_nav(&page, &category);
+    for (id, item) in &u.nav_items {
+        item.set_active(id == &active);
     }
-    let title = PAGES.iter().find(|p| p.0 == page).map(|p| p.1).unwrap_or("Search");
-    chrome::set_title(&u.window, "Store", title);
-    u.header.set_subtitle(title);
     let c = u.catalog.borrow();
+    let title = match &detail {
+        Some(app) => app.name.clone(),
+        None => place_name(c.as_ref(), &page, &category),
+    };
+    chrome::set_title(&u.window, "Store", &title);
     let Some(c) = c.as_ref() else {
         text("Loading your app catalog…");
         return;
     };
     update_badges(c);
-    let category = u.category.borrow().clone();
+    update_foot(c);
+    if let Some(app) = detail {
+        app_page::render(c, &current(c, app));
+        return;
+    }
     match page.as_str() {
         "repositories" => render_repositories(c),
         "updates" => render_updates(c),
@@ -674,40 +829,98 @@ fn render() {
         "search" => render_search(c),
         _ => home::render(c),
     }
-    if !u.busy.get() {
-        u.status.set_text(&format!(
-            "{} apps · {} installed · {}",
-            c.apps.iter().filter(|a| a.desktop).map(|a| &a.package).collect::<BTreeSet<_>>().len(),
-            c.apps.iter().filter(|a| a.desktop && a.installed.is_some()).map(|a| &a.package).collect::<BTreeSet<_>>().len(),
-            if nyx_store::nix::active() { "NyxOS catalog, nixpkgs and Flathub" } else { "Omarchy first" }
-        ));
+}
+
+/// An app as the catalog has it now (installed or removed since its page opened).
+fn current(c: &Catalog, app: App) -> App {
+    if let Some(now) = c.apps.iter().find(|a| a.source == app.source && a.package == app.package) {
+        return now.clone();
+    }
+    App { installed: c.installed.get(&app.package).map(|p| p.version.clone()), ..app }
+}
+
+/// The sidebar item for a page: one of the four kinds, All categories for the others.
+fn active_nav(page: &str, category: &str) -> String {
+    match page {
+        "categories" if KINDS.iter().any(|k| k.1 == category) => format!("cat:{category}"),
+        "categories" if category == "essentials" => "home".into(),
+        _ => page.into(),
     }
 }
 
-/// The count of updates beside Updates in the sidebar: NyxOS's from `nyx update`'s last
+/// A page's name, for the window title and an app page's way back.
+fn place_name(c: Option<&Catalog>, page: &str, category: &str) -> String {
+    match page {
+        "search" => "Results".into(),
+        "categories" if !category.is_empty() => {
+            if let Some(kind) = KINDS.iter().find(|k| k.1 == category) {
+                return kind.0.into();
+            }
+            if category == "essentials" {
+                return "Everyday essentials".into();
+            }
+            match category.strip_prefix("catalog:") {
+                Some(id) => c.and_then(|c| c.groups.iter().find(|g| g.id == id)).map(|g| g.name.clone()).unwrap_or_else(|| id.into()),
+                None => category.into(),
+            }
+        }
+        _ => PAGES.iter().find(|p| p.0 == page).map(|p| p.1).unwrap_or("Home").into(),
+    }
+}
+
+/// The counts beside the sidebar's items: the Nyx apps, each kind of app and what's
+/// installed, and the updates waiting as a badge: NyxOS's from `nyx update`'s last
 /// check (the Flathub ones in the catalog when there's none), Arch's from the catalog
 /// and the AUR check.
 fn update_badges(c: &Catalog) {
     let u = ui();
-    let count = if nyx_store::nix::active() {
+    let updates = if nyx_store::nix::active() {
         u.system_updates.borrow().as_ref().map(|(_, items)| items.len()).unwrap_or(c.updates.len())
     } else {
         c.updates.len() + u.aur_updates.borrow().len()
     };
-    for (id, badge) in &u.nav_badges {
-        let n = if id == "updates" { count } else { 0 };
-        badge.set_text(&if n > 0 { n.to_string() } else { String::new() });
+    let apps = browsable(c);
+    for (id, item) in &u.nav_items {
+        let count = match id.as_str() {
+            "nyx" => c.apps.iter().filter(|a| a.nyx).count(),
+            "installed" => installed_list(c).len(),
+            "updates" => {
+                item.set_badge(Some(updates as u64));
+                continue;
+            }
+            id => match id.strip_prefix("cat:") {
+                Some(category) => apps.iter().filter(|a| a.desktop && a.category == category).count(),
+                None => 0,
+            },
+        };
+        item.set_count(Some(count as u64));
     }
-    show_badges();
 }
 
-/// Badges show when they have a count and the sidebar has its labels.
-fn show_badges() {
-    let u = ui();
-    let compact = u.nav.has_css_class("compact");
-    for (_, badge) in &u.nav_badges {
-        badge.set_visible(!compact && !badge.text().is_empty());
+/// Under the sidebar: the catalog's apps and when it was last refreshed.
+fn update_foot(c: &Catalog) {
+    let apps = c.apps.iter().filter(|a| a.desktop).map(|a| &a.package).collect::<BTreeSet<_>>().len();
+    let checked = nyx_core::paths::cache_dir()
+        .join("catalog-refreshed")
+        .metadata()
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| format!(" · checked {}", ago_short(d.as_secs() as i64)));
+    ui().foot.set_text(&format!("{} apps{}", thousands(apps), checked.unwrap_or_default()));
+}
+
+/// 1148 as "1,148".
+fn thousands(n: usize) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
     }
+    out
 }
 
 /// A grid of tiles, for categories and bundles.
@@ -819,12 +1032,20 @@ fn render_category(c: &Catalog, key: &str) {
             c.groups.iter().find(|g| g.id == id).map(|g| g.name.clone()).unwrap_or_else(|| id.to_string()),
             c.apps.iter().filter(|a| a.group.0 == id && !a.built_in).collect(),
         ),
-        None => (key.to_string(), browsable(c).into_iter().filter(|a| a.desktop && a.category == key).collect()),
+        None if key == "essentials" => {
+            ("Everyday essentials".into(), browsable(c).into_iter().filter(|a| a.desktop && a.popular).collect())
+        }
+        None => (place_name(Some(c), "categories", key), browsable(c).into_iter().filter(|a| a.desktop && a.category == key).collect()),
     };
     if !key.starts_with("catalog:") {
         apps.sort_by_cached_key(|a| (a.source != nyx_store::nix::NYXOS && !a.popular, a.name.to_lowercase()));
     }
-    heading(&title, "");
+    let note = match apps.len() {
+        1 => "1 app".to_string(),
+        n => format!("{} apps", thousands(n)),
+    };
+    let note = if title != key && !key.contains(':') && key != "essentials" { format!("{key} · {note}") } else { note };
+    heading(&title, &note);
     if apps.is_empty() {
         text("Nothing here yet.");
         return;
@@ -840,10 +1061,18 @@ fn render_category(c: &Catalog, key: &str) {
 fn render_nyx(c: &Catalog) {
     let apps: Vec<&App> = c.apps.iter().filter(|a| a.nyx).collect();
     let have = apps.iter().filter(|a| a.installed.is_some()).count();
+    let here = if nyx_store::nix::active() {
+        ""
+    } else {
+        " Here they install into your home folder from their published releases."
+    };
     heading(
         "Nyx Apps",
-        &format!("Apps made for NyxOS, in one design and working together. {have} of {} installed.", apps.len()),
+        &format!("Apps made for NyxOS, in one design and working together.{here} {have} of {} installed.", apps.len()),
     );
+    if apps.is_empty() {
+        text("The Nyx apps' installer couldn't be reached. Refresh with Ctrl+R to try again.");
+    }
     for g in &c.groups {
         let group: Vec<App> = apps.iter().filter(|a| a.group.0 == g.id).map(|a| (*a).clone()).collect();
         if group.is_empty() {
@@ -857,16 +1086,9 @@ fn render_nyx(c: &Catalog) {
 /// Installed: on NyxOS everything installed, by the catalog's sections; on Arch the
 /// desktop apps, each from the source it was installed from.
 fn render_installed(c: &Catalog) {
+    let installed = installed_list(c);
     if nyx_store::nix::active() {
         heading("Your apps", "Everything installed on this computer, from the NyxOS catalog, nixpkgs and Flathub.");
-        let installed: Vec<&App> = c.apps.iter().filter(|a| a.installed.is_some()).collect();
-        let offered: BTreeSet<(String, String)> = installed.iter().flat_map(|a| a.also.iter().cloned()).collect();
-        let mut seen = BTreeSet::new();
-        let installed: Vec<&App> = installed
-            .into_iter()
-            .filter(|a| !offered.contains(&(a.source.clone(), a.package.clone())))
-            .filter(|a| seen.insert((a.source.as_str(), a.package.as_str())))
-            .collect();
         if installed.is_empty() {
             text("Nothing installed from Store yet.");
             return;
@@ -887,6 +1109,27 @@ fn render_installed(c: &Catalog) {
         return;
     }
     heading("Your apps", "Desktop apps installed on this computer.");
+    if installed.is_empty() {
+        text("No desktop apps installed from Store's sources yet.");
+    } else {
+        let apps: Vec<App> = installed.into_iter().cloned().collect();
+        grid(&apps);
+    }
+}
+
+/// What Installed lists: on NyxOS everything installed, once; on Arch the desktop
+/// apps, each from the source it was installed from.
+fn installed_list(c: &Catalog) -> Vec<&App> {
+    if nyx_store::nix::active() {
+        let installed: Vec<&App> = c.apps.iter().filter(|a| a.installed.is_some()).collect();
+        let offered: BTreeSet<(String, String)> = installed.iter().flat_map(|a| a.also.iter().cloned()).collect();
+        let mut seen = BTreeSet::new();
+        return installed
+            .into_iter()
+            .filter(|a| !offered.contains(&(a.source.clone(), a.package.clone())))
+            .filter(|a| seen.insert((a.source.as_str(), a.package.as_str())))
+            .collect();
+    }
     let mut apps = Vec::new();
     let mut seen = BTreeSet::new();
     for a in c.apps.iter().filter(|a| a.installed.is_some() && a.desktop) {
@@ -898,15 +1141,11 @@ fn render_installed(c: &Catalog) {
         {
             continue;
         }
-        if seen.insert(a.package.clone()) {
-            apps.push(a.clone());
+        if seen.insert(a.package.as_str()) {
+            apps.push(a);
         }
     }
-    if apps.is_empty() {
-        text("No desktop apps installed from Store's sources yet.");
-    } else {
-        grid(&apps);
-    }
+    apps
 }
 
 /// Search: the results for the query, best first, with a button per source that has
@@ -948,6 +1187,9 @@ fn render_search(c: &Catalog) {
             sources.push((s.into(), source_name(s).into()));
         }
     } else {
+        if c.apps.iter().any(|a| a.nyx) {
+            sources.push(("nyx".into(), "Nyx Apps".into()));
+        }
         for r in c.repositories.iter().filter(|r| r.enabled) {
             if !sources.iter().any(|(id, _)| id == &r.name) {
                 sources.push((r.name.clone(), r.name.clone()));
@@ -1016,63 +1258,66 @@ fn render_search(c: &Catalog) {
     }
 }
 
-/// Apps as compact rows in up to three columns: the icon, the name and one line about
-/// it, and Install or Open at the end. A row opens the app's details.
+/// Apps as cards in up to three columns: the icon, the name and a line or two about
+/// it, and a labelled Install or Open at the end. A card opens the app's page.
 fn grid(apps: &[App]) {
     let grid = gtk::FlowBox::builder()
         .selection_mode(gtk::SelectionMode::None)
         .activate_on_single_click(true)
         .min_children_per_line(grid_columns())
         .max_children_per_line(3)
-        .column_spacing(16)
-        .row_spacing(4)
+        .column_spacing(10)
+        .row_spacing(10)
         .homogeneous(true)
         .build();
     grid.add_css_class("store-grid");
     let page = ui().page.borrow().clone();
     let searching = page == "search";
-    // Where sources mix, each row says where it's from.
+    // Where sources mix, each card says where it's from.
     let tagged = nyx_store::nix::active() && matches!(page.as_str(), "search" | "categories" | "installed");
     let shown: Vec<App> = apps.iter().take(200).cloned().collect();
     for app in &shown {
-        let row = widgets::hbox(12);
-        row.add_css_class("app-row");
+        let card = widgets::hbox(12);
+        card.add_css_class("app-card");
         // Narrow enough for two columns in a tiled half-screen window.
-        row.set_size_request(250, -1);
+        card.set_size_request(240, -1);
         if !app.summary.is_empty() {
-            row.set_tooltip_text(Some(&app.summary));
+            card.set_tooltip_text(Some(&app.summary));
         }
         let icon = app_icon(app, 44);
         icon.set_valign(gtk::Align::Center);
-        row.append(&icon);
-        let text = widgets::vbox(2);
+        card.append(&icon);
+        let text = widgets::vbox(1);
         text.set_hexpand(true);
         text.set_valign(gtk::Align::Center);
         // Capped natural widths, so long summaries don't cost the grid its columns.
         let name = widgets::label(&app.name, "app-name");
-        name.set_xalign(0.0);
         name.set_ellipsize(gtk::pango::EllipsizeMode::End);
         name.set_max_width_chars(22);
         text.append(&name);
-        let line = widgets::hbox(6);
         let about = widgets::label(if app.summary.is_empty() { &app.category } else { &app.summary }, "app-line");
-        about.set_xalign(0.0);
+        about.set_wrap(true);
+        about.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+        about.set_lines(2);
         about.set_ellipsize(gtk::pango::EllipsizeMode::End);
         about.set_max_width_chars(26);
-        about.set_hexpand(true);
-        line.append(&about);
+        text.append(&about);
+        let tags = widgets::hbox(6);
         if let Some(tag) = source_tag(app).filter(|t| tagged || *t == "AUR") {
-            line.append(&widgets::label(tag, "row-tag"));
+            tags.append(&widgets::label(tag, "row-tag"));
         }
         if app.built_in {
-            line.append(&widgets::label("Built in", "row-tag"));
+            tags.append(&widgets::label("Built in", "row-tag"));
         } else if searching && app.installed.is_some() {
-            line.append(&widgets::label("Installed", "row-tag"));
+            tags.append(&widgets::label("Installed", "row-tag"));
         }
-        text.append(&line);
-        row.append(&text);
-        row.append(&row_action(app));
-        grid.insert(&row, -1);
+        if tags.first_child().is_some() {
+            tags.set_margin_top(3);
+            text.append(&tags);
+        }
+        card.append(&text);
+        card.append(&pill(app));
+        grid.insert(&card, -1);
     }
     grid.connect_child_activated(move |_, child| {
         if let Some(app) = shown.get(child.index() as usize) {
@@ -1082,44 +1327,46 @@ fn grid(apps: &[App]) {
     ui().body.append(&grid);
 }
 
-/// How many columns of app rows fit the page: three in a full window, two in a tiled
-/// half-screen one. Set from the width, since the grid would go by its rows' natural
+/// How many columns of app cards fit the page: three in a full window, two in a tiled
+/// half-screen one. Set from the width, since the grid would go by its cards' natural
 /// widths and give up columns to long summaries.
 fn grid_columns() -> u32 {
     let u = ui();
     let width = if u.window.width() > 0 { u.window.width() } else { u.window.default_width() };
     let sidebar = if u.nav.has_css_class("compact") { 56 } else { 212 };
-    let content = width - sidebar - 48;
-    ((content + 16) / (250 + 16)).clamp(1, 3) as u32
+    let content = (width - sidebar - 72).min(1000);
+    ((content + 10) / (290 + 10)).clamp(1, 3) as u32
 }
 
-/// What a row does directly: Install an app that isn't installed, Open one that is,
-/// or a check for an installed app without a launcher.
-fn row_action(app: &App) -> gtk::Widget {
-    if app.installed.is_some() {
-        if app.desktop_id.is_empty() {
-            let done = gtk::Image::from_icon_name("object-select-symbolic");
-            done.add_css_class("row-installed");
-            done.set_tooltip_text(Some("Installed"));
-            done.set_size_request(32, 32);
-            return done.upcast();
-        }
-        let open = widgets::bar_button("media-playback-start-symbolic", &format!("Open {}", app.name));
-        open.add_css_class("row-action");
-        open.set_valign(gtk::Align::Center);
-        let a = app.clone();
-        open.connect_clicked(move |_| launch(&a));
-        return open.upcast();
+/// What a card does directly, as a labelled pill: Install an app that isn't installed,
+/// Open one that is, or a note for an installed app without a launcher.
+fn pill(app: &App) -> gtk::Widget {
+    if app.installed.is_some() && app.desktop_id.is_empty() {
+        let done = widgets::label(if app.built_in { "Built in" } else { "Installed" }, "pill-note");
+        done.set_valign(gtk::Align::Center);
+        return done.upcast();
     }
-    let tip = if app.source == "aur" { format!("Review the build of {}", app.name) } else { format!("Install {}", app.name) };
-    let get = widgets::bar_button("folder-download-symbolic", &tip);
-    get.add_css_class("row-action");
-    get.add_css_class("get");
-    get.set_valign(gtk::Align::Center);
-    get.set_sensitive(!ui().busy.get());
+    let (label, tip) = if app.installed.is_some() {
+        ("Open", format!("Open {}", app.name))
+    } else if app.source == "aur" {
+        ("Install", format!("Review the build of {}", app.name))
+    } else {
+        ("Install", format!("Install {}", app.name))
+    };
+    let b = gtk::Button::with_label(label);
+    b.add_css_class("pill");
+    b.set_tooltip_text(Some(&tip));
+    b.update_property(&[gtk::accessible::Property::Label(&tip)]);
+    b.set_valign(gtk::Align::Center);
     let a = app.clone();
-    get.connect_clicked(move |_| install(&a));
-    get.upcast()
+    if app.installed.is_some() {
+        b.add_css_class("open");
+        b.connect_clicked(move |_| launch(&a));
+    } else {
+        b.set_sensitive(!ui().busy.get());
+        b.connect_clicked(move |_| install(&a));
+    }
+    b.upcast()
 }
 
 /// Open an installed app from its launcher.
@@ -1135,160 +1382,16 @@ fn launch(app: &App) {
 }
 
 /// Install an app: a repository app after the review of the package changes, an AUR
-/// app after the review of its build files.
+/// app after the review of its build files, a Nyx app on Arch after the review of what
+/// the Nyx installer will do.
 fn install(app: &App) {
     if app.source == "aur" {
         review_aur(&app.package);
+    } else if let Some(name) = app.suite_name() {
+        start_request(Request::NyxApps { change: "install".into(), apps: vec![name.into()] });
     } else {
         start_request(Request::Install { source: app.source.clone(), packages: vec![app.package.clone()] });
     }
-}
-
-fn details(app: App) {
-    let (dialog, card) = widgets::dialog(&app.name, 680);
-    dialog.set_default_height(620);
-    let content = widgets::vbox(14);
-    let head = widgets::hbox(14);
-    head.append(&app_icon(&app, 64));
-    let info = widgets::vbox(6);
-    let summary = widgets::label(&app.summary, "app-summary");
-    summary.set_wrap(true);
-    summary.set_xalign(0.0);
-    info.append(&summary);
-    let source = if app.version.is_empty() {
-        source_name(&app.source).to_string()
-    } else {
-        format!("{} · {}", source_name(&app.source), app.version)
-    };
-    info.append(&widgets::label(&source, "source-tag"));
-    head.append(&info);
-    content.append(&head);
-    let description = widgets::label(if app.description.is_empty() { &app.summary } else { &app.description }, "");
-    description.set_wrap(true);
-    description.set_xalign(0.0);
-    description.set_selectable(true);
-    // Focused, a selectable label selects all its text; it's still selected by dragging.
-    description.set_focusable(false);
-    content.append(&description);
-    if app.source == "aur" {
-        content.append(&widgets::banner(
-            "AUR packages are community build recipes. Review the files before building. Builds run as your user.",
-            true,
-        ));
-    }
-    if !app.license.is_empty() {
-        content.append(&widgets::row("License", &app.license, None));
-    }
-    content.append(&widgets::row("Package", &app.package, None));
-    if nyx_store::nix::active() && !app.scope.is_empty() {
-        let (title, detail) = if app.built_in {
-            ("Built into NyxOS", "Part of the system for everyone; it can't be removed.")
-        } else if app.scope == "everyone" {
-            ("Installs for everyone", "Built into a new system generation; asks for an administrator's password.")
-        } else {
-            ("Installs for you", "Into your own apps; no password needed.")
-        };
-        content.append(&widgets::row(title, detail, None));
-    }
-    for (source, package) in &app.also {
-        let other = ui().catalog.borrow().as_ref().and_then(|c| c.apps.iter().find(|a| &a.source == source && &a.package == package).cloned());
-        let Some(other) = other else { continue };
-        let d = dialog.clone();
-        let (row, _) = widgets::button_row(
-            &format!("Also on {}", source_name(source)),
-            &if other.installed.is_some() { format!("{} · installed", other.name) } else { other.name.clone() },
-            "Show",
-            move |_| {
-                d.close();
-                details(other.clone());
-            },
-        );
-        content.append(&row);
-    }
-    if nyx_store::nix::active() && !app.built_in && [nyx_store::nix::NYXOS, nyx_store::nix::NIXPKGS].contains(&app.source.as_str()) {
-        let command = format!("nyx install {}", app.package);
-        let copy = widgets::bar_button("edit-copy-symbolic", "Copy the command");
-        copy.set_valign(gtk::Align::Center);
-        let c = command.clone();
-        copy.connect_clicked(move |b| {
-            b.clipboard().set_text(&c);
-            toast("Copied the install command");
-        });
-        let row = widgets::row("Install from a terminal", &command, Some(copy.upcast_ref()));
-        row.add_css_class("install-command");
-        content.append(&row);
-    }
-    if let Some(version) = &app.installed {
-        content.append(&widgets::row("Installed version", version, None));
-    }
-    if !app.website.is_empty() && app.website.starts_with("https://") {
-        let link = gtk::LinkButton::with_label(&app.website, "Website");
-        link.set_halign(gtk::Align::Start);
-        content.append(&link);
-    }
-    for index in 0..app.screenshots.len().min(3) {
-        let picture = gtk::Picture::new();
-        picture.set_can_shrink(true);
-        picture.set_content_fit(gtk::ContentFit::Contain);
-        picture.set_height_request(220);
-        content.append(&picture);
-        load_picture(&app, index, &picture);
-    }
-    let scroll = gtk::ScrolledWindow::builder()
-        .child(&content)
-        .vexpand(true)
-        .hscrollbar_policy(gtk::PolicyType::Never)
-        .min_content_height(280)
-        .max_content_height(540)
-        .propagate_natural_height(true)
-        .build();
-    card.append(&scroll);
-    let actions = widgets::hbox(8);
-    actions.set_halign(gtk::Align::End);
-    let d = dialog.clone();
-    let close = button("Close", move || d.close());
-    actions.append(&close);
-    if app.installed.is_some() {
-        if !app.desktop_id.is_empty() {
-            let a = app.clone();
-            actions.append(&button("Open", move || launch(&a)));
-        }
-        if app.removable() {
-            let package = app.package.clone();
-            let d = dialog.clone();
-            let armed = Rc::new(Cell::new(false));
-            let remove = gtk::Button::with_label("Remove");
-            remove.add_css_class("destructive-action");
-            remove.connect_clicked(move |b| {
-                if armed.replace(true) {
-                    d.close();
-                    start_request(Request::Remove { package: package.clone() });
-                } else {
-                    b.set_label("Click again to remove");
-                    let a = armed.clone();
-                    let b = b.clone();
-                    glib::timeout_add_local_once(std::time::Duration::from_secs(4), move || {
-                        a.set(false);
-                        b.set_label("Remove");
-                    });
-                }
-            });
-            actions.append(&remove);
-        }
-    } else {
-        let d = dialog.clone();
-        let a = app.clone();
-        let get = button(if app.source == "aur" { "Review build" } else { "Install" }, move || {
-            d.close();
-            install(&a);
-        });
-        get.add_css_class("suggested-action");
-        get.set_sensitive(!ui().busy.get());
-        actions.append(&get);
-    }
-    card.append(&actions);
-    dialog.present();
-    close.grab_focus();
 }
 
 /// A source as people read it.
@@ -1297,7 +1400,22 @@ fn source_name(source: &str) -> &str {
         "nyxos" => "NyxOS catalog",
         "nixpkgs" => "nixpkgs",
         "flathub" => "Flathub",
+        "aur" => "AUR",
+        nyx_store::suite::SUITE => "Nyx installer",
         other => other,
+    }
+}
+
+/// Where an app comes from, as its page and the spotlight say it: "Arch Linux · extra".
+fn source_label(app: &App) -> String {
+    match app.source.as_str() {
+        s @ ("core" | "extra" | "multilib") => format!("Arch Linux · {s}"),
+        "omarchy" => "Omarchy".into(),
+        "aur" => "AUR · community recipe".into(),
+        "blackarch" => "BlackArch".into(),
+        nyx_store::suite::SUITE => "Nyx · published release".into(),
+        "unknown" | "local" => "Installed outside Store".into(),
+        s => source_name(s).into(),
     }
 }
 
@@ -1358,6 +1476,30 @@ fn render_updates(c: &Catalog) {
         );
         u.body.append(&row.0);
     }
+    // The Nyx apps have no versions to compare here: updating installs each one's latest
+    // release, as `nyx update` does.
+    let nyx: Vec<String> = c
+        .apps
+        .iter()
+        .filter(|a| a.installed.is_some())
+        .filter_map(|a| a.suite_name())
+        .filter(|name| c.suite.install.contains(*name))
+        .map(String::from)
+        .collect();
+    heading("Nyx app updates", "The Nyx installer puts each Nyx app's latest release in place of the one you have.");
+    if nyx.is_empty() {
+        text("No Nyx apps installed from their releases.");
+        return;
+    }
+    let count = nyx.len();
+    let (row, update) = widgets::button_row(
+        "Update the Nyx apps",
+        &format!("{count} Nyx {} installed", if count == 1 { "app" } else { "apps" }),
+        "Review",
+        move |_| start_request(Request::NyxApps { change: "update".into(), apps: nyx.clone() }),
+    );
+    update.set_sensitive(!u.busy.get());
+    u.body.append(&row);
 }
 
 /// NyxOS: the system updates as one (NyxOS, its Nyx apps and everything installed for
@@ -1422,6 +1564,18 @@ fn ago(time: i64) -> String {
         s if s < 3600 => plural(s / 60, "minute"),
         s if s < 86400 => plural(s / 3600, "hour"),
         s => plural(s / 86400, "day"),
+    }
+}
+
+/// How long ago a time was, short enough for the sidebar: "5 min ago".
+fn ago_short(time: i64) -> String {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+    match (now - time).max(0) {
+        s if s < 60 => "just now".into(),
+        s if s < 3600 => format!("{} min ago", s / 60),
+        s if s < 86400 => format!("{} h ago", s / 3600),
+        s if s < 2 * 86400 => "yesterday".into(),
+        s => format!("{} days ago", s / 86400),
     }
 }
 
@@ -1521,7 +1675,7 @@ fn render_repositories(c: &Catalog) {
         }
     }
     ui().body.append(&additional);
-    let add = button("Add repository", || repository_dialog(None));
+    let add = button("Add a source…", || repository_dialog(None));
     add.set_halign(gtk::Align::Start);
     add.set_margin_top(12);
     ui().body.append(&add);
@@ -1704,7 +1858,11 @@ fn start_request(request: Request) {
     u.cancel_button.set_visible(!setup);
     *u.cancelled.borrow_mut() = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     notice("");
-    u.status.set_text("Authorizing package operation…");
+    u.status.set_text(if matches!(request, Request::NyxApps { .. }) {
+        "Reviewing Nyx apps…"
+    } else {
+        "Authorizing package operation…"
+    });
     let (send, receive) = async_channel::unbounded();
     let (confirm, confirmed) = mpsc::channel();
     *u.confirmation.borrow_mut() = Some(confirm);
@@ -1787,8 +1945,24 @@ fn transaction_review(plan: Plan) {
     let (dialog, card) = widgets::dialog("Review package changes", 680);
     dialog.set_default_height(600);
     let bytes: i64 = plan.changes.iter().map(|c| c.bytes).sum();
+    let suite = !plan.changes.is_empty() && plan.changes.iter().all(|c| c.source == nyx_store::suite::SUITE);
     let note = widgets::label(
-        &if nyx_store::nix::active() && plan.changes.iter().all(|c| c.source == "flathub") {
+        &if suite {
+            let one = plan.changes.len() == 1;
+            let count = if one { "1 Nyx app".to_string() } else { format!("{} Nyx apps", plan.changes.len()) };
+            if plan.changes.iter().all(|c| c.new.is_none()) {
+                format!(
+                    "{count}. The Nyx uninstaller removes {} from your home folder and keeps {} settings and data, the same as running the command below.",
+                    if one { "it" } else { "them" },
+                    if one { "its" } else { "their" },
+                )
+            } else {
+                format!(
+                    "{count}. {} into your home folder (~/.local) with the Nyx installer, the same as running the command below. No password is needed, but an app that needs Arch packages you don't have yet stops with an error: install those first.",
+                    if one { "Its latest published release installs" } else { "Their latest published releases install" },
+                )
+            }
+        } else if nyx_store::nix::active() && plan.changes.iter().all(|c| c.source == "flathub") {
             format!(
                 "{} {}. Flathub apps are yours alone: changing them needs no administrator's password.",
                 plan.changes.len(),
@@ -1826,6 +2000,29 @@ fn transaction_review(plan: Plan) {
     }
     let scroll = gtk::ScrolledWindow::builder().child(&list).vexpand(true).hscrollbar_policy(gtk::PolicyType::Never).build();
     card.append(&scroll);
+    if suite {
+        let action = if plan.changes.iter().all(|c| c.new.is_none()) { "remove" } else { "install" };
+        let apps: Vec<String> = plan
+            .changes
+            .iter()
+            .filter_map(|c| {
+                let u = ui();
+                let catalog = u.catalog.borrow();
+                catalog.as_ref()?.apps.iter().find(|a| a.name == c.name)?.suite_name().map(String::from)
+            })
+            .collect();
+        let command = widgets::label(&nyx_store::suite::command(action, &apps), "dim");
+        command.add_css_class("monospace");
+        command.set_selectable(true);
+        command.set_focusable(false);
+        command.set_wrap(true);
+        command.set_wrap_mode(gtk::pango::WrapMode::Char);
+        let attrs = gtk::pango::AttrList::new();
+        attrs.insert(gtk::pango::AttrInt::new_insert_hyphens(false));
+        command.set_attributes(Some(&attrs));
+        command.set_xalign(0.0);
+        card.append(&command);
+    }
     // What has to be agreed to (unfree licenses, services, groups): Apply waits for it.
     let agree = (!plan.notes.is_empty()).then(|| {
         for n in &plan.notes {

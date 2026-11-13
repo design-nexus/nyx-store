@@ -8,4 +8,5 @@ pub mod packages;
 pub mod provenance;
 pub mod repositories;
 pub mod search;
+pub mod suite;
 pub mod transaction;

@@ -8,7 +8,8 @@ fn main() -> glib::ExitCode {
     nyx_core::app::init(nyx_core::app::App { slug: "nyx-store", name: "Store" });
     if std::env::args().any(|a| a == "--help") {
         println!(
-            "Usage: nyx-store [--section home|nyx|categories|installed|updates|repositories] [--search TEXT] [--remove DESKTOP-ID]\n\
+            "Usage: nyx-store [--section home|nyx|categories|installed|updates|sources] [--search TEXT] [--app PACKAGE] [--remove DESKTOP-ID]\n\
+             \n  --app PACKAGE        open the page of the app with this package name\
              \n  --remove DESKTOP-ID  show the installed app a launcher belongs to, to remove it"
         );
         return glib::ExitCode::SUCCESS;
@@ -101,7 +102,7 @@ fn main() -> glib::ExitCode {
     app.connect_command_line(|app, cli| {
         let args: Vec<_> = cli.arguments().iter().map(|a| a.to_string_lossy().to_string()).collect();
         let value = |key| args.iter().position(|a| a == key).and_then(|i| args.get(i + 1)).map(String::as_str);
-        window::present(app, value("--section"), value("--search"), value("--remove"));
+        window::present(app, value("--section"), value("--search"), value("--remove"), value("--app"));
         glib::ExitCode::SUCCESS
     });
     app.connect_shutdown(|_| prefs::flush());

@@ -1,10 +1,11 @@
-//! Home: the spotlight, the collections and shelves of apps, each section in its own
-//! colour from the theme's swatches. On NyxOS, the Nyx apps and the catalog's bundles too.
+//! Home: a short spotlight with its Install button, then sections of apps as cards
+//! with labelled Install and Open, the Nyx apps and the NyxOS catalog's bundles.
 use super::*;
 use nyx_store::nix::NYXOS;
 
 pub(super) fn render(catalog: &Catalog) {
-    let nix = nyx_store::nix::active();
+    let tier = ui().tier.get();
+    let narrow = tier == 0;
     let apps: Vec<App> = browsable(catalog)
         .into_iter()
         .filter(|a| a.desktop && !a.built_in && (repositories::official(&a.source) || a.source == NYXOS))
@@ -14,80 +15,313 @@ pub(super) fn render(catalog: &Catalog) {
         text("The catalog has no apps yet. Refresh it with Ctrl+R.");
         return;
     }
-    featured(&apps);
-    collections(&apps);
-    if nix {
-        nyx_shelf(catalog);
-        bundles(catalog);
-    }
+    let shelf_size = if narrow { 4 } else { 6 };
+    featured(&apps, tier == 2);
     let picks: Vec<App> =
         ["firefox", "libreoffice-fresh", "libreoffice", "keepassxc", "vlc", "signal-desktop", "signal", "obsidian"]
             .iter()
             .filter_map(|name| apps.iter().find(|a| a.package == *name).cloned())
-            .take(6)
+            .take(shelf_size)
             .collect();
-    let from = if nix { "A few great places to start." } else { "A few great places to start, handpicked from Arch." };
-    shelf("Everyday essentials", from, "starred-symbolic", "accent", &picks, None);
-    for (category, title, copy) in [
-        ("Graphics", "Make something extraordinary", "From the first sketch to the final frame."),
-        ("Audio & video", "Your own creative studio", "Record it. Cut it. Share it with the world."),
-        ("Games", "Clock out. Play on.", "A little adventure belongs on every desktop."),
-        ("Development", "Build what comes next", "Great tools for your next big idea."),
+    if !picks.is_empty() {
+        let more = More::Link("See all".into(), "See every everyday essential".into(), Box::new(|| category_page("essentials")));
+        section_head("Everyday essentials", "starred-symbolic", more);
+        grid(&picks);
+    }
+    nyx_shelf(catalog, narrow);
+    bundles(catalog, narrow);
+    for (category, title) in [
+        ("Graphics", "Make something extraordinary"),
+        ("Audio & video", "Your own creative studio"),
+        ("Games", "Clock out. Play on."),
+        ("Development", "Build what comes next"),
     ] {
         let mut selection: Vec<App> = apps.iter().filter(|a| a.category == category).cloned().collect();
         selection.sort_by_key(|a| !a.popular);
-        selection.truncate(6);
-        let see_all = SeeAll(format!("See all {}", category.to_lowercase()), Box::new(move || category_page(category)));
-        shelf(title, copy, category_icon(category), theme::tone(category), &selection, Some(see_all));
+        selection.truncate(shelf_size);
+        if selection.is_empty() {
+            continue;
+        }
+        let tip = format!("See all {} apps", category.to_lowercase());
+        section_head(title, category_icon(category), More::Link("See all".into(), tip, Box::new(move || category_page(category))));
+        grid(&selection);
     }
 }
 
-/// Made for NyxOS: the Nyx apps not installed yet first, and See all for the Nyx Apps page.
-fn nyx_shelf(catalog: &Catalog) {
+/// What a section heading has at its right: a link (its label, tooltip and where it
+/// goes) or a note.
+enum More {
+    Link(String, String, Box<dyn Fn()>),
+    Note(&'static str),
+}
+
+/// A section's heading: its icon in the accent, its title, and See all or a note.
+fn section_head(title: &str, icon: &str, more: More) {
+    let head = widgets::hbox(8);
+    head.add_css_class("section-head");
+    let image = gtk::Image::from_icon_name(icon);
+    image.add_css_class("section-icon");
+    head.append(&image);
+    let t = widgets::label(title, "section-name");
+    t.set_hexpand(true);
+    t.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    head.append(&t);
+    match more {
+        More::Link(label, tip, go) => {
+            let b = gtk::Button::with_label(&label);
+            b.add_css_class("see-all");
+            b.set_tooltip_text(Some(&tip));
+            b.update_property(&[gtk::accessible::Property::Label(&tip)]);
+            b.connect_clicked(move |_| go());
+            head.append(&b);
+        }
+        More::Note(note) => head.append(&widgets::label(note, "section-note")),
+    }
+    ui().body.append(&head);
+}
+
+/// Made for NyxOS: the Nyx apps not installed yet first, as a row of tall cards, and
+/// See all for the Nyx apps page.
+fn nyx_shelf(catalog: &Catalog, narrow: bool) {
     let mut apps: Vec<App> = catalog.apps.iter().filter(|a| a.nyx && !a.built_in).cloned().collect();
+    if apps.is_empty() {
+        return;
+    }
+    let total = catalog.apps.iter().filter(|a| a.nyx).count();
     apps.sort_by_key(|a| (a.installed.is_some(), !a.popular));
-    apps.truncate(6);
-    let see_all = SeeAll("See all Nyx apps".into(), Box::new(|| navigate("nyx")));
-    shelf("Made for NyxOS", "The Nyx suite: one design, working together.", "view-app-grid-symbolic", "accent", &apps, Some(see_all));
+    let count = if narrow { 4 } else { 5 };
+    apps.truncate(count);
+    let more = More::Link(format!("See all {total}"), "See all the Nyx apps".into(), Box::new(|| navigate("nyx")));
+    section_head("Made for NyxOS", "view-app-grid-symbolic", more);
+    let row = gtk::FlowBox::builder()
+        .selection_mode(gtk::SelectionMode::None)
+        .activate_on_single_click(true)
+        .min_children_per_line(count as u32)
+        .max_children_per_line(count as u32)
+        .column_spacing(10)
+        .row_spacing(10)
+        .homogeneous(true)
+        .build();
+    row.add_css_class("store-grid");
+    row.add_css_class("nyx-row");
+    for app in &apps {
+        let card = widgets::vbox(8);
+        card.add_css_class("nyx-card");
+        let icon = app_icon(app, 52);
+        icon.set_halign(gtk::Align::Center);
+        card.append(&icon);
+        let name = widgets::label(app.name.strip_prefix("Nyx ").unwrap_or(&app.name), "app-name");
+        name.set_halign(gtk::Align::Center);
+        name.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        card.append(&name);
+        let action = pill(app);
+        action.set_halign(gtk::Align::Center);
+        card.append(&action);
+        if !app.summary.is_empty() {
+            card.set_tooltip_text(Some(&app.summary));
+        }
+        row.insert(&card, -1);
+    }
+    row.connect_child_activated(move |_, child| {
+        if let Some(app) = apps.get(child.index() as usize) {
+            details(app.clone());
+        }
+    });
+    ui().body.append(&row);
+}
+
+/// One of a bundle's items as its card and review show it: its name, what it installs,
+/// an app for its icon, whether it's all installed, and on Arch its AUR package to build.
+struct Entry {
+    name: String,
+    detail: String,
+    icon: App,
+    installed: bool,
+    aur: Option<String>,
+}
+
+/// A bundle's items: on NyxOS the catalog's apps; on Arch what each installs here, from
+/// the repositories, the AUR or the Nyx installer.
+fn entries(c: &Catalog, bundle: &catalog::Bundle) -> Vec<Entry> {
+    if nyx_store::nix::active() {
+        return bundle
+            .items
+            .iter()
+            .filter_map(|id| c.apps.iter().find(|a| a.source == NYXOS && a.package == *id))
+            .map(|a| Entry {
+                name: a.name.clone(),
+                detail: a.summary.clone(),
+                icon: a.clone(),
+                installed: a.installed.is_some(),
+                aur: None,
+            })
+            .collect();
+    }
+    bundle
+        .arch
+        .iter()
+        .map(|item| {
+            let have = |(source, package): &(String, String)| {
+                if source == nyx_store::suite::SUITE {
+                    c.apps.iter().any(|a| &a.source == source && &a.package == package && a.installed.is_some())
+                } else {
+                    c.installed.contains_key(package)
+                }
+            };
+            let first = &item.packages[0];
+            let icon = c
+                .apps
+                .iter()
+                .find(|a| a.source == first.0 && a.package == first.1)
+                .cloned()
+                .unwrap_or_else(|| App { package: first.1.clone(), name: item.name.clone(), ..Default::default() });
+            let mut detail = item
+                .packages
+                .iter()
+                .map(|(source, package)| {
+                    if source == nyx_store::suite::SUITE {
+                        "Nyx app".to_string()
+                    } else {
+                        format!("{package} · {}", source_name(source))
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            if !item.missing.is_empty() {
+                detail.push_str(&format!(" · without {}", item.missing.join(", ")));
+            }
+            Entry {
+                name: item.name.clone(),
+                detail,
+                icon,
+                installed: item.packages.iter().all(have),
+                aur: item.packages.iter().find(|p| p.0 == "aur" && !have(p)).map(|p| p.1.clone()),
+            }
+        })
+        .collect()
+}
+
+/// Names as a sentence: "A, B and C", or the first few and how many more.
+fn listed(names: &[String]) -> String {
+    match names {
+        [] => String::new(),
+        [one] => one.clone(),
+        [first @ .., last] if first.len() < 3 => format!("{} and {last}", first.join(", ")),
+        _ => format!("{} and {} more", names[..2].join(", "), names.len() - 2),
+    }
 }
 
 /// The catalog's bundles: apps for one kind of work, reviewed and installed together.
-fn bundles(catalog: &Catalog) {
-    if catalog.bundles.is_empty() {
+/// On Arch a card says which of its items Arch doesn't have.
+fn bundles(catalog: &Catalog, narrow: bool) {
+    let shown: Vec<catalog::Bundle> =
+        catalog.bundles.iter().filter(|b| !entries(catalog, b).is_empty()).cloned().collect();
+    if shown.is_empty() {
         return;
     }
-    shelf_head("Bundles", "Everything for one kind of work, installed in one go.", "folder-download-symbolic", "accent", None);
-    let grid = tile_grid();
-    for bundle in &catalog.bundles {
-        let missing = catalog
-            .apps
-            .iter()
-            .filter(|a| a.source == NYXOS && a.installed.is_none() && bundle.items.contains(&a.package))
-            .count();
-        let line = match missing {
-            0 => format!("{} apps · all installed", bundle.items.len()),
-            n => format!("{} apps · {n} to install", bundle.items.len()),
-        };
-        let tone = match bundle.id.as_str() {
-            "everyday" => "amber",
-            "developer" => "teal",
-            "ai-developer" => "violet",
-            "homelab" => "blue",
-            _ => "graphite",
-        };
-        let b = bundle.clone();
-        let t = tile(&bundle.name, &line, "folder-download-symbolic", tone, move || bundle_dialog(&b));
-        t.set_tooltip_text(Some(&bundle.summary));
-        grid.insert(&t, -1);
+    section_head("Bundles", "folder-download-symbolic", More::Note("Install a whole set in one go"));
+    let grid = gtk::FlowBox::builder()
+        .selection_mode(gtk::SelectionMode::None)
+        .activate_on_single_click(true)
+        .min_children_per_line(if narrow { 1 } else { 2 })
+        .max_children_per_line(if narrow { 1 } else { 2 })
+        .column_spacing(10)
+        .row_spacing(10)
+        .homogeneous(true)
+        .build();
+    grid.add_css_class("store-grid");
+    for bundle in &shown {
+        let items = entries(catalog, bundle);
+        let missing = items.iter().filter(|e| !e.installed).count();
+        let card = widgets::hbox(14);
+        card.add_css_class("bundle-card");
+        // The first three apps' icons, overlapping; desktop apps first, which have icons.
+        let icons = gtk::Fixed::new();
+        icons.add_css_class("bundle-icons");
+        icons.set_valign(gtk::Align::Center);
+        let firsts = items.iter().filter(|e| e.icon.desktop).chain(items.iter().filter(|e| !e.icon.desktop));
+        for (i, entry) in firsts.take(3).enumerate() {
+            icons.put(&app_icon(&entry.icon, 30), i as f64 * 22.0, 0.0);
+        }
+        card.append(&icons);
+        let words = widgets::vbox(1);
+        words.set_hexpand(true);
+        words.set_valign(gtk::Align::Center);
+        let name = widgets::label(&bundle.name, "app-name");
+        name.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        words.append(&name);
+        let line = widgets::label(&bundle.summary, "app-line");
+        line.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        words.append(&line);
+        if !bundle.left_out.is_empty() {
+            let out = widgets::label(&format!("Not on Arch: {}", listed(&bundle.left_out)), "bundle-left-out");
+            out.set_ellipsize(gtk::pango::EllipsizeMode::End);
+            out.set_tooltip_text(Some(&format!("Arch and the AUR have nothing for {}", bundle.left_out.join(", "))));
+            words.append(&out);
+        }
+        card.append(&words);
+        if missing == 0 {
+            let done = widgets::label("Installed", "pill-note");
+            done.set_valign(gtk::Align::Center);
+            card.append(&done);
+        } else {
+            let get = gtk::Button::with_label(&format!("Install {missing}"));
+            get.add_css_class("pill");
+            get.set_valign(gtk::Align::Center);
+            get.set_tooltip_text(Some(&format!("Review and install {}", bundle.name)));
+            get.set_sensitive(!ui().busy.get());
+            let b = bundle.clone();
+            get.connect_clicked(move |_| bundle_dialog(&b));
+            card.append(&get);
+        }
+        card.set_tooltip_text(Some(&bundle.summary));
+        grid.insert(&card, -1);
     }
+    grid.connect_child_activated(move |_, child| {
+        if let Some(bundle) = shown.get(child.index() as usize) {
+            bundle_dialog(bundle);
+        }
+    });
     ui().body.append(&grid);
 }
 
-/// A bundle's apps, those installed marked, and Install for the rest: one review.
+/// What installing a bundle on Arch takes: each repository's packages, then the Nyx
+/// apps, each reviewed in turn. AUR packages build one at a time from their own review.
+fn arch_requests(c: &Catalog, bundle: &catalog::Bundle) -> Vec<Request> {
+    let mut repos: Vec<(String, Vec<String>)> = Vec::new();
+    let mut nyx = Vec::new();
+    for (source, package) in bundle.arch.iter().flat_map(|i| &i.packages) {
+        if source == nyx_store::suite::SUITE {
+            let app = c.apps.iter().find(|a| &a.source == source && &a.package == package);
+            if let Some(name) = app.filter(|a| a.installed.is_none()).and_then(|a| a.suite_name())
+                && !nyx.iter().any(|n| n == name)
+            {
+                nyx.push(name.to_string());
+            }
+        } else if source != "aur" && !c.installed.contains_key(package) {
+            match repos.iter_mut().find(|(s, _)| s == source) {
+                Some((_, packages)) if !packages.contains(package) => packages.push(package.clone()),
+                Some(_) => {}
+                None => repos.push((source.clone(), vec![package.clone()])),
+            }
+        }
+    }
+    let mut requests: Vec<Request> =
+        repos.into_iter().map(|(source, packages)| Request::Install { source, packages }).collect();
+    if !nyx.is_empty() {
+        requests.push(Request::NyxApps { change: "install".into(), apps: nyx });
+    }
+    requests
+}
+
+
+/// A bundle's apps, those installed marked, and Install for the rest: one review (on
+/// Arch one per repository, and one for the Nyx apps).
 fn bundle_dialog(bundle: &catalog::Bundle) {
     let u = ui();
     let catalog = u.catalog.borrow();
     let Some(c) = catalog.as_ref() else { return };
+    let nix = nyx_store::nix::active();
     let (dialog, card) = widgets::dialog(&bundle.name, 560);
     dialog.set_default_height(560);
     let note = widgets::label(&bundle.summary, "dim");
@@ -96,14 +330,22 @@ fn bundle_dialog(bundle: &catalog::Bundle) {
     card.append(&note);
     let list = widgets::vbox(0);
     list.add_css_class("group-list");
-    let mut missing = Vec::new();
-    for id in &bundle.items {
-        let Some(app) = c.apps.iter().find(|a| a.source == NYXOS && a.package == *id) else { continue };
-        let state = widgets::label("Installed", "source-tag");
-        list.append(&widgets::row(&app.name, &app.summary, app.installed.is_some().then(|| state.upcast_ref())));
-        if app.installed.is_none() {
-            missing.push(id.clone());
-        }
+    for entry in entries(c, bundle) {
+        let control: Option<gtk::Widget> = if entry.installed {
+            Some(widgets::label("Installed", "source-tag").upcast())
+        } else if let Some(package) = entry.aur.clone() {
+            let d = dialog.clone();
+            let review = button("Review build", move || {
+                d.close();
+                review_aur(&package);
+            });
+            review.set_tooltip_text(Some("AUR packages build one at a time, after you review their recipe"));
+            review.set_sensitive(!u.busy.get());
+            Some(review.upcast())
+        } else {
+            None
+        };
+        list.append(&widgets::row(&entry.name, &entry.detail, control.as_ref()));
     }
     let scroll = gtk::ScrolledWindow::builder()
         .child(&list)
@@ -114,23 +356,71 @@ fn bundle_dialog(bundle: &catalog::Bundle) {
         .propagate_natural_height(true)
         .build();
     card.append(&scroll);
+    if !nix && !bundle.left_out.is_empty() {
+        let out = widgets::label(
+            &format!("Left out, with no package of the same name on Arch or the AUR: {}.", bundle.left_out.join(", ")),
+            "dim",
+        );
+        out.set_wrap(true);
+        out.set_xalign(0.0);
+        card.append(&out);
+    }
+    let services: Vec<String> = bundle.arch.iter().flat_map(|i| i.services.iter().cloned()).collect::<BTreeSet<_>>().into_iter().collect();
+    if !nix && !services.is_empty() {
+        let text = format!(
+            "On NyxOS these turn on services ({}). Here Store installs their packages and leaves the services off; turn them on with systemctl when you want them.",
+            services.join(", ")
+        );
+        card.append(&widgets::banner(&glib::markup_escape_text(&text), false));
+    }
     let actions = widgets::hbox(8);
     actions.set_halign(gtk::Align::End);
     let d = dialog.clone();
     let close = button("Not now", move || d.close());
     actions.append(&close);
-    let label = match missing.len() {
-        0 => "All installed".to_string(),
-        1 => "Install 1 app".to_string(),
-        n => format!("Install {n} apps"),
+    let (label, requests) = if nix {
+        let missing: Vec<String> = bundle
+            .items
+            .iter()
+            .filter(|id| c.apps.iter().any(|a| a.source == NYXOS && a.package == **id && a.installed.is_none()))
+            .cloned()
+            .collect();
+        let label = match missing.len() {
+            0 => String::new(),
+            1 => "Install 1 app".to_string(),
+            n => format!("Install {n} apps"),
+        };
+        let requests =
+            if missing.is_empty() { Vec::new() } else { vec![Request::Install { source: NYXOS.into(), packages: missing }] };
+        (label, requests)
+    } else {
+        let requests = arch_requests(c, bundle);
+        let count: usize = requests
+            .iter()
+            .map(|r| match r {
+                Request::Install { packages, .. } => packages.len(),
+                Request::NyxApps { apps, .. } => apps.len(),
+                _ => 0,
+            })
+            .sum();
+        let label = match count {
+            0 => String::new(),
+            1 => "Install 1 package".to_string(),
+            n => format!("Install {n} packages"),
+        };
+        (label, requests)
     };
     let d = dialog.clone();
-    let install = button(&label, move || {
+    let install = button(if label.is_empty() { "All installed" } else { &label }, move || {
         d.close();
-        start_request(Request::Install { source: NYXOS.into(), packages: missing.clone() });
+        let mut queue: VecDeque<Request> = requests.clone().into();
+        if let Some(first) = queue.pop_front() {
+            *ui().queue.borrow_mut() = queue;
+            start_request(first);
+        }
     });
     install.add_css_class("suggested-action");
-    install.set_sensitive(label != "All installed" && !u.busy.get());
+    install.set_sensitive(!label.is_empty() && !u.busy.get());
     actions.append(&install);
     card.append(&actions);
     dialog.present();
@@ -141,56 +431,22 @@ fn category_icon(category: &str) -> &'static str {
     catalog::CATEGORIES.iter().find(|(c, _)| *c == category).map(|(_, i)| *i).unwrap_or("view-app-grid-symbolic")
 }
 
-/// A shelf's See all: its tooltip and where it goes.
-struct SeeAll(String, Box<dyn Fn()>);
-
-/// A section of apps: its heading, then the apps.
-fn shelf(title: &str, note: &str, icon: &str, tone: &str, apps: &[App], see_all: Option<SeeAll>) {
-    if apps.is_empty() {
-        return;
-    }
-    shelf_head(title, note, icon, tone, see_all);
-    grid(apps);
-}
-
-/// A shelf's heading: its chip, title and note, and See all.
-fn shelf_head(title: &str, note: &str, icon: &str, tone: &str, see_all: Option<SeeAll>) {
-    let header = widgets::hbox(12);
-    header.add_css_class("shelf-head");
-    header.append(&tone_chip(icon, tone, 30));
-    let words = widgets::vbox(1);
-    words.set_hexpand(true);
-    words.set_valign(gtk::Align::Center);
-    let t = widgets::label(title, "shelf-title");
-    t.set_xalign(0.0);
-    t.set_wrap(true);
-    words.append(&t);
-    let n = widgets::label(note, "shelf-note");
-    n.set_xalign(0.0);
-    n.set_wrap(true);
-    words.append(&n);
-    header.append(&words);
-    if let Some(SeeAll(tip, go)) = see_all {
-        let more = widgets::bar_button("go-next-symbolic", &tip);
-        more.connect_clicked(move |_| go());
-        more.set_valign(gtk::Align::Center);
-        header.append(&more);
-    }
-    ui().body.append(&header);
-}
-
 fn category_page(category: &str) {
     let u = ui();
+    u.detail.borrow_mut().take();
     *u.page.borrow_mut() = "categories".into();
     *u.category.borrow_mut() = category.into();
-    prefs::update(|p| p.last_section = "categories".into());
+    let section = if KINDS.iter().any(|k| k.1 == category) { format!("cat:{category}") } else { "categories".into() };
+    prefs::update(|p| p.last_section = section);
     u.scroll.vadjustment().set_value(0.0);
     super::render();
 }
 
-fn featured(apps: &[App]) {
+/// The spotlight: a short banner in its app's colours with the words and Install at
+/// the left, the app's screenshot at the right when there's room, and a dot per app.
+fn featured(apps: &[App], wide: bool) {
     let scenes: Vec<(&App, &str, &str, &str)> = [
-        ("blender", "MAKE SOMETHING BIG", "Bring your imagination into another dimension.", "coral"),
+        ("blender", "MAKE SOMETHING BIG", "Model, animate and render in 3D, from the first sketch to the final frame.", "coral"),
         ("krita", "A CANVAS WITHOUT LIMITS", "A whole studio of brushes. One blank canvas. Your next idea.", "pink"),
         ("obs-studio", "READY FOR YOUR CLOSE-UP", "Turn your screen into a studio, and your ideas into a broadcast.", "blue"),
     ]
@@ -205,147 +461,114 @@ fn featured(apps: &[App]) {
     stack.set_transition_type(gtk::StackTransitionType::Crossfade);
     stack.set_transition_duration(if prefs::get().reduce_motion { 0 } else { 160 });
     for (index, (app, title, copy, tone)) in scenes.iter().enumerate() {
-        let tile = gtk::Button::new();
-        tile.add_css_class("feature-hero");
-        tile.add_css_class(&format!("tone-{tone}"));
-        tile.set_overflow(gtk::Overflow::Hidden);
-        tile.set_tooltip_text(Some(&format!("Explore {}", app.name)));
-        let overlay = gtk::Overlay::new();
-        overlay.set_overflow(gtk::Overflow::Hidden);
-        let row = widgets::hbox(12);
-        row.add_css_class("feature-content");
-        let words = widgets::vbox(8);
-        words.set_hexpand(true);
-        words.set_valign(gtk::Align::Center);
-        let eyebrow = widgets::label(title, "feature-eyebrow");
-        eyebrow.set_xalign(0.0);
-        eyebrow.set_wrap(true);
-        words.append(&eyebrow);
-        let name = widgets::label(&app.name, "feature-title");
-        name.set_xalign(0.0);
-        name.set_wrap(true);
-        words.append(&name);
-        let description = widgets::label(copy, "feature-description");
-        description.set_xalign(0.0);
-        description.set_wrap(true);
-        description.set_max_width_chars(36);
-        words.append(&description);
-        let action = widgets::label(&format!("Explore {}  →", app.name), "feature-action");
-        action.set_halign(gtk::Align::Start);
-        words.append(&action);
-        let tag = widgets::label(
-            &format!("{}{}", source_name(&app.source), match (app.installed.is_some(), nyx_store::nix::active()) {
-                (true, _) => " · In your library",
-                (false, true) => " · Available",
-                (false, false) => " · Available on Arch",
-            }),
-            "source-tag",
-        );
-        tag.set_xalign(0.0);
-        words.append(&tag);
-        row.append(&words);
-        let art = app_icon(app, 96);
-        art.add_css_class("feature-app-icon");
-        art.set_valign(gtk::Align::Center);
-        row.append(&art);
-        let backdrop = gtk::Picture::new();
-        backdrop.set_can_shrink(true);
-        backdrop.set_content_fit(gtk::ContentFit::Cover);
+        let hero = gtk::Overlay::new();
+        hero.add_css_class("feature-hero");
+        hero.add_css_class(&format!("tone-{tone}"));
+        hero.set_overflow(gtk::Overflow::Hidden);
+        hero.set_tooltip_text(Some(&format!("More about {}", app.name)));
+        hero.set_cursor_from_name(Some("pointer"));
         let base = widgets::hbox(0);
         base.add_css_class("feature-base");
-        overlay.set_child(Some(&base));
-        overlay.add_overlay(&backdrop);
-        // Overlays never contribute the screenshot's natural width to the window.
-        let shade = widgets::hbox(0);
-        shade.add_css_class("feature-shade");
-        overlay.add_overlay(&shade);
-        overlay.add_overlay(&row);
-        overlay.set_measure_overlay(&row, true);
-        load_picture(app, 0, &backdrop);
-        tile.set_child(Some(&overlay));
-        let app = (*app).clone();
-        tile.connect_clicked(move |_| details(app.clone()));
-        stack.add_named(&tile, Some(&index.to_string()));
+        hero.set_child(Some(&base));
+        if wide {
+            let shot = gtk::Picture::new();
+            shot.add_css_class("feature-shot");
+            shot.set_can_shrink(true);
+            shot.set_content_fit(gtk::ContentFit::Cover);
+            shot.set_overflow(gtk::Overflow::Hidden);
+            // Its natural width is the screenshot's; the clamp keeps it a card.
+            let frame = nyx_ui::clamp::Clamp::new(&shot, 360);
+            frame.set_halign(gtk::Align::End);
+            frame.set_valign(gtk::Align::End);
+            frame.set_margin_top(26);
+            frame.set_margin_end(26);
+            hero.add_overlay(&frame);
+            load_picture(app, 0, &shot);
+        }
+        let words = widgets::vbox(6);
+        words.add_css_class("feature-words");
+        words.set_valign(gtk::Align::Center);
+        words.set_halign(gtk::Align::Start);
+        let eyebrow = widgets::label(title, "feature-eyebrow");
+        words.append(&eyebrow);
+        let name = widgets::label(&app.name, "feature-title");
+        words.append(&name);
+        let description = widgets::label(copy, "feature-description");
+        description.set_wrap(true);
+        description.set_max_width_chars(if wide { 46 } else { 64 });
+        words.append(&description);
+        let actions = widgets::hbox(12);
+        actions.set_margin_top(8);
+        let action: gtk::Widget = if app.installed.is_some() && !app.desktop_id.is_empty() {
+            let open = gtk::Button::with_label("Open");
+            open.add_css_class("suggested-action");
+            let a = (*app).clone();
+            open.connect_clicked(move |_| launch(&a));
+            open.upcast()
+        } else if app.installed.is_some() {
+            widgets::label("Installed", "feature-source").upcast()
+        } else {
+            let get = gtk::Button::new();
+            get.add_css_class("suggested-action");
+            let content = widgets::hbox(8);
+            content.append(&gtk::Image::from_icon_name("folder-download-symbolic"));
+            content.append(&gtk::Label::new(Some("Install")));
+            get.set_child(Some(&content));
+            get.set_tooltip_text(Some(&format!("Install {}", app.name)));
+            get.set_sensitive(!ui().busy.get());
+            let a = (*app).clone();
+            get.connect_clicked(move |_| install(&a));
+            get.upcast()
+        };
+        action.set_valign(gtk::Align::Center);
+        actions.append(&action);
+        let source = widgets::label(&source_label(app), "feature-source");
+        source.set_valign(gtk::Align::Center);
+        actions.append(&source);
+        words.append(&actions);
+        hero.add_overlay(&words);
+        hero.set_measure_overlay(&words, true);
+        let click = gtk::GestureClick::new();
+        let a = (*app).clone();
+        click.connect_released(move |gesture, _, _, _| {
+            gesture.set_state(gtk::EventSequenceState::Claimed);
+            details(a.clone());
+        });
+        hero.add_controller(click);
+        stack.add_named(&hero, Some(&index.to_string()));
     }
-    ui().body.append(&stack);
-
-    // Under the spotlight: a dot per app, the current one lit, and the arrows.
-    let controls = widgets::hbox(6);
-    controls.add_css_class("feature-controls");
-    let dots = widgets::hbox(6);
-    dots.add_css_class("page-dots");
-    dots.set_hexpand(true);
-    dots.set_valign(gtk::Align::Center);
-    let count = scenes.len();
-    let marks: Vec<gtk::Box> = (0..count)
-        .map(|i| {
-            let dot = widgets::hbox(0);
+    let spotlight = gtk::Overlay::new();
+    spotlight.add_css_class("spotlight");
+    spotlight.set_child(Some(&stack));
+    if scenes.len() > 1 {
+        let dots = widgets::hbox(5);
+        dots.add_css_class("page-dots");
+        dots.set_halign(gtk::Align::Start);
+        dots.set_valign(gtk::Align::End);
+        let marks: Rc<RefCell<Vec<gtk::Button>>> = Rc::new(RefCell::new(Vec::new()));
+        for (index, (app, ..)) in scenes.iter().enumerate() {
+            let dot = gtk::Button::new();
             dot.add_css_class("page-dot");
-            if i == 0 {
+            if index == 0 {
                 dot.add_css_class("current");
             }
+            dot.set_tooltip_text(Some(&app.name));
+            dot.update_property(&[gtk::accessible::Property::Label(&format!("Show {}", app.name))]);
+            let (stack, marks_ref) = (stack.clone(), marks.clone());
+            dot.connect_clicked(move |_| {
+                for (i, m) in marks_ref.borrow().iter().enumerate() {
+                    if i == index {
+                        m.add_css_class("current");
+                    } else {
+                        m.remove_css_class("current");
+                    }
+                }
+                stack.set_visible_child_name(&index.to_string());
+            });
             dots.append(&dot);
-            dot
-        })
-        .collect();
-    controls.append(&dots);
-    let current = Rc::new(Cell::new(0usize));
-    let marks = Rc::new(marks);
-    for (icon, tip, forwards) in
-        [("go-previous-symbolic", "Previous featured app", false), ("go-next-symbolic", "Next featured app", true)]
-    {
-        let arrow = widgets::bar_button(icon, tip);
-        let (stack, current, marks) = (stack.clone(), current.clone(), marks.clone());
-        arrow.connect_clicked(move |_| {
-            let index = if forwards { (current.get() + 1) % count } else { (current.get() + count - 1) % count };
-            marks[current.get()].remove_css_class("current");
-            marks[index].add_css_class("current");
-            current.set(index);
-            stack.set_visible_child_name(&index.to_string());
-        });
-        controls.append(&arrow);
+            marks.borrow_mut().push(dot);
+        }
+        spotlight.add_overlay(&dots);
     }
-    ui().body.append(&controls);
-}
-
-/// Four ways in, each a short tile in its category's colour.
-fn collections(apps: &[App]) {
-    let grid = gtk::FlowBox::builder()
-        .selection_mode(gtk::SelectionMode::None)
-        .min_children_per_line(2)
-        .max_children_per_line(4)
-        .column_spacing(12)
-        .row_spacing(12)
-        .homogeneous(true)
-        .build();
-    grid.add_css_class("home-collections");
-    for (title, category, icon) in [
-        ("Create", "Graphics", "applications-graphics-symbolic"),
-        ("Work", "Productivity", "accessories-text-editor-symbolic"),
-        ("Play", "Games", "applications-games-symbolic"),
-        ("Develop", "Development", "utilities-terminal-symbolic"),
-    ] {
-        let tone = theme::tone(category);
-        let tile = button(title, move || category_page(category));
-        tile.add_css_class("collection-tile");
-        tile.add_css_class(&format!("tone-{tone}"));
-        tile.set_tooltip_text(Some(&format!("Browse {}", category.to_lowercase())));
-        // The child replaces the button's label, so it has no name of its own.
-        tile.update_property(&[gtk::accessible::Property::Label(&format!("{title}: {category}"))]);
-        let content = widgets::hbox(12);
-        content.append(&tone_chip(icon, tone, 36));
-        let words = widgets::vbox(1);
-        words.set_valign(gtk::Align::Center);
-        let name = widgets::label(title, "collection-name");
-        name.set_xalign(0.0);
-        words.append(&name);
-        let count = apps.iter().filter(|a| a.category == category).count();
-        let n = widgets::label(&format!("{count} apps"), "collection-count");
-        n.set_xalign(0.0);
-        words.append(&n);
-        content.append(&words);
-        tile.set_child(Some(&content));
-        grid.insert(&tile, -1);
-    }
-    ui().body.append(&grid);
+    ui().body.append(&spotlight);
 }

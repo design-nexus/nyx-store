@@ -1,7 +1,6 @@
-/* Store on Nyx 2.0: only Store's own parts. One surface: the filters, the pages and
-   the tiles share the window's background; cards and spacing, not lines, separate
-   them. Buttons, inputs, the sidebar, the header, banners and toasts come from the
-   shared sheets. */
+/* Store on Nyx 2.0: only Store's own parts. One surface: the pages share the
+   window's background; cards with a hairline hold the apps. Buttons, inputs, the
+   sidebar, the header, banners and toasts come from the shared sheets. */
 
 /* ---------- Header ---------- */
 
@@ -19,22 +18,39 @@ window.store-window .app-header button.bar-button {
   box-shadow: none;
 }
 
+.store-window .search-key {
+  font-size: 11px;
+  color: @theme_text_tertiary;
+}
+
 /* ---------- Sidebar ---------- */
 
-.store-window .nav-badge {
-  min-width: 18px;
-  padding: 0 6px;
-  border-radius: 999px;
-  background: @theme_accent;
-  color: @theme_on_accent;
-  font-size: 11px;
-  font-weight: 600;
-  font-feature-settings: "tnum";
+/* On the icon rail a bar in each group's colour stands for its heading. */
+.settings-navigation separator.nav-divider {
+  margin: 8px 14px 6px;
+  min-height: 2px;
+  border-radius: 1px;
+  background: @theme_divider;
 }
+
+window.store-window button.store-foot {
+  min-height: 28px;
+  margin-top: 4px;
+  padding: 0 4px 0 8px;
+  background: transparent;
+}
+
+window.store-window button.store-foot:hover { background: @row_hover; }
+
+.store-window .foot-ok { color: @theme_success; -gtk-icon-size: 14px; }
+
+.store-window .foot-text { font-size: 11px; font-weight: 400; color: @theme_dim_text; font-feature-settings: "tnum"; }
 
 /* ---------- Search, notices, progress ---------- */
 
-.store-window .search-head { margin-bottom: 10px; }
+.store-window .search-head { margin: 2px 2px 10px; }
+
+.store-window .shelf-title { font-size: 15px; font-weight: 600; color: @theme_text; }
 
 .store-window .search-filters { margin-bottom: 14px; }
 
@@ -67,6 +83,35 @@ window.store-window .app-header button.bar-button {
   padding: 12px 18px;
   margin: 16px;
 }
+
+/* ---------- Headings ---------- */
+
+.store-window .store-heading { margin: 22px 2px 12px; }
+
+.store-window .settings-page > .store-heading:first-child { margin-top: 2px; }
+
+.store-window .heading-title { font-size: 15px; font-weight: 600; color: @theme_text; }
+
+.store-window .heading-note { font-size: 12.5px; color: @theme_dim_text; }
+
+/* A Home section: its icon in the accent, its title, and See all. */
+.store-window .section-head { margin: 22px 2px 10px; }
+
+.store-window .section-icon { color: @theme_accent; -gtk-icon-size: 16px; }
+
+.store-window .section-name { font-size: 14px; font-weight: 600; color: @theme_text; }
+
+.store-window .section-note { font-size: 12.5px; color: @theme_text_tertiary; }
+
+window.store-window button.see-all {
+  min-height: 24px;
+  padding: 0 4px;
+  background: transparent;
+  color: @theme_accent;
+  font-weight: 500;
+}
+
+window.store-window button.see-all:hover { background: alpha(@theme_accent, 0.1); }
 
 /* ---------- Tones ---------- */
 
@@ -104,24 +149,25 @@ window.store-window .app-header button.bar-button {
 .store-window .collection-tile.tone-graphite:hover { background: mix(@theme_card, @store_graphite, 0.17); }
 .store-window .tone-accent.tone-chip { background: mix(@theme_card, @theme_accent, 0.22); color: @theme_accent; }
 
-/* ---------- App rows ---------- */
+/* ---------- App cards ---------- */
 
 .store-window flowbox.store-grid { padding: 0; }
 
 .store-window flowbox.store-grid > flowboxchild {
   padding: 0;
-  border-radius: var(--nyx-radius-small);
-  background: transparent;
+  border-radius: var(--nyx-radius-card);
+  background: @theme_card;
+  box-shadow: inset 0 0 0 1px @hairline;
   transition: background 120ms ease-out;
 }
 
-.store-window flowbox.store-grid > flowboxchild:hover { background: @row_hover; }
+.store-window flowbox.store-grid > flowboxchild:hover { background: mix(@theme_card, @theme_text, 0.04); }
 
 .store-window flowbox.store-grid > flowboxchild:focus-visible { box-shadow: inset 0 0 0 1px alpha(@theme_accent, 0.6); }
 
-.store-window .app-row { padding: 10px; min-height: 44px; }
+.store-window .app-card { padding: 10px 12px; min-height: 46px; }
 
-.store-window .app-name { font-weight: 500; }
+.store-window .app-name { font-weight: 600; }
 
 .store-window .app-line { font-size: 12px; color: @theme_dim_text; }
 
@@ -134,26 +180,37 @@ window.store-window .app-header button.bar-button {
   color: @theme_accent;
 }
 
-/* Install and Open: the same square, tinted in the accent. */
-window.store-window button.row-action {
-  min-width: 32px;
-  min-height: 32px;
-  padding: 0;
-  border-radius: var(--nyx-radius-small);
-  background: mix(@theme_card, @theme_accent, 0.2);
+/* Install and Open: labelled pills, Install in the accent's tint. */
+window.store-window button.pill {
+  min-height: 26px;
+  padding: 0 14px;
+  border: none;
+  border-radius: 13px;
+  background: alpha(@theme_accent, 0.16);
   color: @theme_accent;
+  font-size: 12px;
+  font-weight: 600;
 }
 
-window.store-window button.row-action:hover {
-  background: @theme_accent;
-  color: @theme_on_accent;
+window.store-window button.pill:hover { background: alpha(@theme_accent, 0.26); }
+
+window.store-window button.pill.open {
+  background: @field;
+  color: @theme_text;
+  box-shadow: inset 0 0 0 1px @hairline;
 }
 
-.store-window .row-installed { color: @theme_text_tertiary; }
+window.store-window button.pill.open:hover { background: @row_hover; }
+
+.store-window .pill-note { padding: 0 6px; font-size: 12px; color: @theme_text_tertiary; }
+
+.store-window .nyx-card { padding: 14px 10px; }
+
+.store-window .bundle-card { padding: 12px 14px; }
+
+.store-window .bundle-left-out { font-size: 11.5px; color: @theme_text_tertiary; }
 
 /* ---------- Text ---------- */
-
-.store-window .app-summary { font-size: 12.5px; color: @theme_dim_text; }
 
 .store-window .source-tag { font-size: 11.5px; color: @theme_text_tertiary; }
 
@@ -168,80 +225,58 @@ window.store-window button.row-action:hover {
 
 .store-window .empty-state { padding: 48px 24px; color: @theme_dim_text; }
 
-.store-window .detail-icon { margin-right: 14px; }
-
 /* ---------- Home ---------- */
 
-/* The spotlight: the app's screenshot under a shade in its colour, words on the left. */
-.store-window .feature-hero {
-  padding: 0;
-  border: none;
-  border-radius: var(--nyx-radius-card);
-  background: @theme_card;
-  box-shadow: none;
+/* The spotlight: a short, dark banner in its app's colours in either theme, the
+   words at the left and the screenshot at the right running off its foot. */
+.store-window .feature-hero { border-radius: 14px; background: #16131b; }
+
+.store-window .feature-base { min-height: 210px; }
+
+.store-window .settings-page.narrow .feature-base { min-height: 190px; }
+
+.store-window .feature-hero.tone-coral .feature-base {
+  background: linear-gradient(100deg, mix(#16131b, @store_coral, 0.26), mix(#16131b, @store_violet, 0.30) 55%, mix(#16131b, @store_green, 0.60));
+}
+.store-window .feature-hero.tone-pink .feature-base {
+  background: linear-gradient(100deg, mix(#16131b, @store_pink, 0.28), mix(#16131b, @store_violet, 0.30) 55%, mix(#16131b, @store_amber, 0.50));
+}
+.store-window .feature-hero.tone-blue .feature-base {
+  background: linear-gradient(100deg, mix(#16131b, @store_blue, 0.28), mix(#16131b, @store_violet, 0.30) 55%, mix(#16131b, @store_teal, 0.55));
 }
 
-.store-window .feature-base { background: @theme_card; }
+.store-window .feature-words { margin: 0 30px 18px; }
 
-.store-window .feature-content { padding: 32px 36px; min-height: 300px; }
+.store-window .feature-eyebrow { font-size: 11px; font-weight: 700; letter-spacing: 0.1em; color: #ffc9a8; }
+.store-window .feature-hero.tone-pink .feature-eyebrow { color: #ffc2e2; }
+.store-window .feature-hero.tone-blue .feature-eyebrow { color: #bcd8ff; }
 
-.store-window .feature-shade {
-  background: linear-gradient(90deg, alpha(@theme_bg, 0.94), alpha(@theme_bg, 0.72) 52%, alpha(@theme_bg, 0.12));
+.store-window .feature-title { font-size: 26px; font-weight: 700; letter-spacing: -0.02em; color: #ffffff; }
+
+.store-window .feature-description { font-size: 13px; color: alpha(#ffffff, 0.85); }
+
+.store-window .feature-source { font-size: 12px; color: alpha(#ffffff, 0.7); }
+
+.store-window .feature-shot {
+  border-radius: 8px 8px 0 0;
+  box-shadow: 0 12px 30px alpha(@theme_shadow, 0.45);
 }
 
-.store-window .feature-eyebrow {
-  color: @theme_accent;
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.06em;
-}
+.store-window .page-dots { margin: 0 0 14px 30px; }
 
-.store-window .feature-hero.tone-coral .feature-base { background: mix(@theme_card, @store_coral, 0.25); }
-.store-window .feature-hero.tone-coral .feature-shade {
-  background: linear-gradient(90deg, alpha(mix(@theme_bg, @store_coral, 0.22), 0.96), alpha(mix(@theme_bg, @store_coral, 0.16), 0.78) 50%, alpha(@store_coral, 0.10));
-}
-.store-window .feature-hero.tone-coral .feature-eyebrow { color: @store_coral; }
-.store-window .feature-hero.tone-pink .feature-base { background: mix(@theme_card, @store_pink, 0.25); }
-.store-window .feature-hero.tone-pink .feature-shade {
-  background: linear-gradient(90deg, alpha(mix(@theme_bg, @store_pink, 0.22), 0.96), alpha(mix(@theme_bg, @store_pink, 0.16), 0.78) 50%, alpha(@store_pink, 0.10));
-}
-.store-window .feature-hero.tone-pink .feature-eyebrow { color: @store_pink; }
-.store-window .feature-hero.tone-blue .feature-base { background: mix(@theme_card, @store_blue, 0.25); }
-.store-window .feature-hero.tone-blue .feature-shade {
-  background: linear-gradient(90deg, alpha(mix(@theme_bg, @store_blue, 0.22), 0.96), alpha(mix(@theme_bg, @store_blue, 0.16), 0.78) 50%, alpha(@store_blue, 0.10));
-}
-.store-window .feature-hero.tone-blue .feature-eyebrow { color: @store_blue; }
-
-.store-window .feature-title { font-size: 26px; font-weight: 600; color: @theme_text; }
-
-.store-window .feature-description { font-size: 13px; color: @theme_text; }
-
-.store-window .feature-action {
-  padding: 6px 12px;
-  margin-top: 4px;
-  border-radius: var(--nyx-radius-small);
-  background: @theme_accent;
-  color: @theme_on_accent;
-  font-weight: 500;
-}
-
-.store-window .feature-app-icon { margin: 16px; }
-
-.store-window .feature-controls { padding: 8px 0 16px 2px; }
-
-.store-window .page-dot {
+window.store-window button.page-dot {
   min-width: 6px;
   min-height: 6px;
-  border-radius: 999px;
-  background: @track;
+  padding: 0;
+  border: none;
+  border-radius: 3px;
+  background: alpha(#ffffff, 0.4);
   transition: background 200ms ease-out, min-width 200ms ease-out;
 }
 
-.store-window .page-dot.current { min-width: 18px; background: @theme_accent; }
+window.store-window button.page-dot.current { min-width: 18px; background: #ffffff; }
 
 /* Collections and categories: short tiles tinted in their colour. */
-.store-window .home-collections { margin: 0 0 4px; }
-
 .store-window .collection-tile {
   padding: 12px 14px;
   border: none;
@@ -255,15 +290,60 @@ window.store-window button.row-action:hover {
 
 .store-window .collection-count { font-size: 11.5px; color: @theme_dim_text; font-feature-settings: "tnum"; }
 
-/* A shelf: its chip, title and note over its apps. */
-.store-window .shelf-head { margin-top: 30px; margin-bottom: 8px; }
+/* ---------- An app's page ---------- */
 
-.store-window .shelf-title { font-size: 15px; font-weight: 600; color: @theme_text; }
+.store-window .store-app-page { padding: 0 8px 24px; }
 
-.store-window .shelf-note { font-size: 12.5px; color: @theme_dim_text; }
+window.store-window button.back-link {
+  min-height: 26px;
+  margin-bottom: 12px;
+  padding: 0 6px;
+  background: transparent;
+  color: @theme_accent;
+  font-weight: 500;
+}
 
-/* ---------- Narrow ---------- */
+window.store-window button.back-link:hover { background: alpha(@theme_accent, 0.1); }
 
-.store-window .settings-page.narrow .feature-content { padding: 22px; min-height: 240px; }
-.store-window .settings-page.narrow .feature-app-icon { margin: 4px; }
-.store-window .settings-page.narrow .feature-title { font-size: 22px; }
+.store-window .app-page-name { font-size: 24px; font-weight: 700; letter-spacing: -0.02em; color: @theme_text; }
+
+.store-window .app-by { color: @theme_dim_text; }
+
+.store-window .app-chip {
+  padding: 3px 8px;
+  border-radius: 6px;
+  background: @field;
+  box-shadow: inset 0 0 0 1px @hairline;
+  font-size: 11.5px;
+  color: @theme_text;
+}
+
+.store-window .app-chip.accent { background: alpha(@theme_accent, 0.14); box-shadow: none; color: @theme_accent; }
+
+window.store-window button.big-action { min-height: 34px; padding: 0 22px; font-size: 14px; }
+
+.store-window .action-note { font-size: 11px; color: @theme_text_tertiary; }
+
+.store-window .app-shots { margin-top: 22px; }
+
+.store-window .app-shot { border-radius: 8px; background: @theme_card; }
+
+.store-window .app-columns { margin-top: 20px; }
+
+.store-window .app-description { color: @theme_dim_text; }
+
+.store-window .app-facts { padding: 2px 0; box-shadow: inset 0 0 0 1px @hairline; }
+
+.store-window .fact { min-height: 38px; padding: 2px 14px; }
+
+.store-window .fact + .fact { border-top: 1px solid @hairline; }
+
+.store-window .fact-key { color: @theme_dim_text; }
+
+.store-window .fact-value { color: @theme_text; }
+
+.store-window .fact-command { font-size: 11px; color: @theme_dim_text; }
+
+window.store-window button.fact-link { min-height: 0; padding: 0; background: transparent; color: @theme_accent; }
+
+window.store-window button.fact-link:hover { text-decoration: underline; }
