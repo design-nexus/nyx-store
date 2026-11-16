@@ -233,6 +233,9 @@ pub fn load(cache: &Path, refresh: bool) -> Result<Catalog> {
     fs::create_dir_all(cache)?;
     let (mut flathub, warning) = match flathub_appstream(refresh).and_then(|x| catalog::parse(&x)) {
         Ok(apps) => (apps, String::new()),
+        Err(e) if nyx_system_proto::offline_error(&format!("{e:#}")) => {
+            (Vec::new(), format!("Flathub apps aren't shown: {}", nyx_system_proto::OFFLINE))
+        }
         Err(e) => (Vec::new(), format!("Flathub could not load: {e}")),
     };
     // Icons resolve as @cache:flathub/SIZE/ID.png under cache/swicons.
@@ -706,19 +709,34 @@ fn apply(w: &Work, send: &async_channel::Sender<Event>) -> Result<String> {
     if w.update {
         return update(send);
     }
+    // Each stage on its own: when a later one fails, say what was done before it.
+    let mut done: Vec<&str> = Vec::new();
+    let failed = |done: &[&str], what: &str, e: anyhow::Error| -> anyhow::Error {
+        let before = if done.is_empty() { String::new() } else { format!("{}; ", done.join("; ")) };
+        anyhow::anyhow!("{before}{what} failed: {e:#}")
+    };
     if !w.system.is_empty() {
         step(send, "nyx-system", &["apply", "-"], Some(&serde_json::to_string(&w.system)?))?;
+        done.push("System changes applied");
     }
     let line = |l: &str| {
         let _ = send.send_blocking(Event::Status { message: l.to_string() });
     };
-    nyx_catalog::flatpak(&w.flatpak_install, true, line)?;
-    nyx_catalog::flatpak(&w.flatpak_remove, false, line)?;
-    nyx_catalog::nix_profile(&w.flake_install, true, line)?;
-    nyx_catalog::nix_profile(&w.flake_remove, false, line)?;
-    for element in &w.profile_remove {
-        step(send, "nix", &["profile", "remove", element], None)?;
+    if !w.flatpak_install.is_empty() || !w.flatpak_remove.is_empty() {
+        nyx_catalog::flatpak(&w.flatpak_install, true, line)
+            .and_then(|()| nyx_catalog::flatpak(&w.flatpak_remove, false, line))
+            .map_err(|e| failed(&done, "Flathub", e))?;
+        done.push("Flathub apps done");
     }
+    let profile = nyx_catalog::nix_profile(&w.flake_install, true, line)
+        .and_then(|()| nyx_catalog::nix_profile(&w.flake_remove, false, line))
+        .and_then(|()| {
+            for element in &w.profile_remove {
+                step(send, "nix", &["profile", "remove", element], None)?;
+            }
+            Ok(())
+        });
+    profile.map_err(|e| failed(&done, "Your apps", e))?;
     Ok(if w.plan.changes.iter().all(|c| c.new.is_none()) { "Removed".into() } else { "Installed".into() })
 }
 
@@ -779,7 +797,9 @@ mod tests {
         }
         let of = |id: &str| groups.iter().find(|g| g.id == id).unwrap();
         assert!(desktop(of("browsers")) && desktop(of("nyx-tools")) && desktop(of("agent-apps")));
-        assert!(!desktop(of("cli-tools")) && !desktop(of("languages")) && !desktop(of("containers")) && !desktop(of("coding-agents")));
+        assert!(
+            !desktop(of("cli-tools")) && !desktop(of("languages")) && !desktop(of("containers")) && !desktop(of("coding-agents"))
+        );
     }
 
     #[test]

@@ -107,9 +107,10 @@ pub fn recipe(cache: &Path, package: &str) -> Result<Recipe> {
             && matches!(
                 key,
                 "depends" | "makedepends" | "checkdepends" | "depends_x86_64" | "makedepends_x86_64" | "checkdepends_x86_64"
-            ) {
-                dependencies.push(value.to_string());
-            }
+            )
+        {
+            dependencies.push(value.to_string());
+        }
     }
     dependencies.sort();
     dependencies.dedup();

@@ -163,8 +163,9 @@ pub fn parse(xml: &str) -> Result<Vec<App>> {
             c.children()
                 .find(|n| n.has_tag_name("developer"))
                 .and_then(|d| {
-                    d.children()
-                        .find(|n| n.has_tag_name("name") && n.attribute(("http://www.w3.org/XML/1998/namespace", "lang")).is_none())
+                    d.children().find(|n| {
+                        n.has_tag_name("name") && n.attribute(("http://www.w3.org/XML/1998/namespace", "lang")).is_none()
+                    })
                 })
                 .and_then(|n| n.text())
                 .unwrap_or("")
@@ -219,10 +220,11 @@ fn metadata(cache: &Path, refresh: bool, h: &alpm::Alpm) -> Result<Vec<App>> {
         let archive = cache.join("appstream.pkg.tar.zst");
         if (refresh || !archive.exists())
             && refresh
-                && let Some(p) = packages::preferred(h, "archlinux-appstream-data")
-                    && let (Some(filename), Some(source)) = (p.filename(), p.db()) {
-                        fs::write(&archive, download_metadata(p, source, filename)?)?;
-                    }
+            && let Some(p) = packages::preferred(h, "archlinux-appstream-data")
+            && let (Some(filename), Some(source)) = (p.filename(), p.db())
+        {
+            fs::write(&archive, download_metadata(p, source, filename)?)?;
+        }
         if archive.exists() {
             let list = Command::new("/usr/bin/bsdtar").arg("-tf").arg(&archive).output()?;
             ensure!(list.status.success(), "Cannot read Arch app metadata");
@@ -391,16 +393,16 @@ pub fn load(cache: &Path, refresh: bool) -> Result<Catalog> {
             }
             if let Some(old) = installed.get(p.name())
                 && alpm::vercmp(p.version().as_str(), old.version.as_str()).is_gt()
-                    && sources.get(p.name()).is_some_and(|(s, stamp)| s == db.name() && stamp == &old.stamp)
-                {
-                    updates.push(crate::model::Change {
-                        name: p.name().into(),
-                        old: Some(old.version.clone()),
-                        new: Some(p.version().to_string()),
-                        source: db.name().into(),
-                        bytes: p.size(),
-                    });
-                }
+                && sources.get(p.name()).is_some_and(|(s, stamp)| s == db.name() && stamp == &old.stamp)
+            {
+                updates.push(crate::model::Change {
+                    name: p.name().into(),
+                    old: Some(old.version.clone()),
+                    new: Some(p.version().to_string()),
+                    source: db.name().into(),
+                    bytes: p.size(),
+                });
+            }
             apps.push(a);
         }
     }
@@ -424,9 +426,10 @@ pub fn load(cache: &Path, refresh: bool) -> Result<Catalog> {
     }
     for a in &mut apps {
         if a.installed.is_some()
-            && let Ok(p) = h.localdb().pkg(a.package.as_str()) {
-                enrich_launcher(p, a);
-            }
+            && let Ok(p) = h.localdb().pkg(a.package.as_str())
+        {
+            enrich_launcher(p, a);
+        }
     }
     let nyx = crate::suite::load(cache, refresh, |name| {
         packages::preferred(&h, name)
@@ -476,10 +479,9 @@ fn enrich_launcher(p: &alpm::Package, app: &mut App) {
                 section = line == "[Desktop Entry]";
                 continue;
             }
-            if section
-                && let Some((key, value)) = line.split_once('=') {
-                    desktop.insert(key, value);
-                }
+            if section && let Some((key, value)) = line.split_once('=') {
+                desktop.insert(key, value);
+            }
         }
         if desktop.get("NoDisplay") == Some(&"true") || desktop.get("Hidden") == Some(&"true") {
             continue;
@@ -493,13 +495,15 @@ fn enrich_launcher(p: &alpm::Package, app: &mut App) {
         app.desktop = true;
         app.desktop_id = path.rsplit('/').next().unwrap_or("").into();
         if app.name == app.package
-            && let Some(name) = desktop.get("Name") {
-                app.name = (*name).into();
-            }
+            && let Some(name) = desktop.get("Name")
+        {
+            app.name = (*name).into();
+        }
         if app.icon.is_empty()
-            && let Some(icon) = desktop.get("Icon") {
-                app.icon = (*icon).into();
-            }
+            && let Some(icon) = desktop.get("Icon")
+        {
+            app.icon = (*icon).into();
+        }
         if app.category.is_empty() {
             app.category = category(&categories.split(';').map(str::to_string).collect::<Vec<_>>());
         }

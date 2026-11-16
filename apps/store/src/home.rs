@@ -45,7 +45,11 @@ pub(super) fn render(catalog: &Catalog) {
             continue;
         }
         let tip = format!("See all {} apps", category.to_lowercase());
-        section_head(title, category_icon(category), More::Link("See all".into(), tip, Box::new(move || category_page(category))));
+        section_head(
+            title,
+            category_icon(category),
+            More::Link("See all".into(), tip, Box::new(move || category_page(category))),
+        );
         grid(&selection);
     }
 }
@@ -171,12 +175,11 @@ fn entries(c: &Catalog, bundle: &catalog::Bundle) -> Vec<Entry> {
                 }
             };
             let first = &item.packages[0];
-            let icon = c
-                .apps
-                .iter()
-                .find(|a| a.source == first.0 && a.package == first.1)
-                .cloned()
-                .unwrap_or_else(|| App { package: first.1.clone(), name: item.name.clone(), ..Default::default() });
+            let icon = c.apps.iter().find(|a| a.source == first.0 && a.package == first.1).cloned().unwrap_or_else(|| App {
+                package: first.1.clone(),
+                name: item.name.clone(),
+                ..Default::default()
+            });
             let mut detail = item
                 .packages
                 .iter()
@@ -216,8 +219,7 @@ fn listed(names: &[String]) -> String {
 /// The catalog's bundles: apps for one kind of work, reviewed and installed together.
 /// On Arch a card says which of its items Arch doesn't have.
 fn bundles(catalog: &Catalog, narrow: bool) {
-    let shown: Vec<catalog::Bundle> =
-        catalog.bundles.iter().filter(|b| !entries(catalog, b).is_empty()).cloned().collect();
+    let shown: Vec<catalog::Bundle> = catalog.bundles.iter().filter(|b| !entries(catalog, b).is_empty()).cloned().collect();
     if shown.is_empty() {
         return;
     }
@@ -308,14 +310,12 @@ fn arch_requests(c: &Catalog, bundle: &catalog::Bundle) -> Vec<Request> {
             }
         }
     }
-    let mut requests: Vec<Request> =
-        repos.into_iter().map(|(source, packages)| Request::Install { source, packages }).collect();
+    let mut requests: Vec<Request> = repos.into_iter().map(|(source, packages)| Request::Install { source, packages }).collect();
     if !nyx.is_empty() {
         requests.push(Request::NyxApps { change: "install".into(), apps: nyx });
     }
     requests
 }
-
 
 /// A bundle's apps, those installed marked, and Install for the rest: one review (on
 /// Arch one per repository, and one for the Nyx apps).
@@ -367,7 +367,8 @@ fn bundle_dialog(bundle: &catalog::Bundle) {
         out.set_xalign(0.0);
         card.append(&out);
     }
-    let services: Vec<String> = bundle.arch.iter().flat_map(|i| i.services.iter().cloned()).collect::<BTreeSet<_>>().into_iter().collect();
+    let services: Vec<String> =
+        bundle.arch.iter().flat_map(|i| i.services.iter().cloned()).collect::<BTreeSet<_>>().into_iter().collect();
     if !nix && !services.is_empty() {
         let text = format!(
             "On NyxOS these turn on services ({}). Here Store installs their packages and leaves the services off; turn them on with systemctl when you want them.",

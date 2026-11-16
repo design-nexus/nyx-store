@@ -84,20 +84,38 @@ pub struct Plan {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum Request {
-    Install { source: String, packages: Vec<String> },
-    Remove { package: String },
+    Install {
+        source: String,
+        packages: Vec<String>,
+    },
+    Remove {
+        package: String,
+    },
     Update,
     /// NixOS: back to the system generation before this one.
     Rollback,
     BlackarchSetup,
-    Sources { assignments: Vec<(String, String, String)> },
-    Repository { repository: crate::repositories::Repository },
-    TrustKey { fingerprint: String },
-    AurInstall { artifacts: Vec<String>, base: String, commit: String },
+    Sources {
+        assignments: Vec<(String, String, String)>,
+    },
+    Repository {
+        repository: crate::repositories::Repository,
+    },
+    TrustKey {
+        fingerprint: String,
+    },
+    AurInstall {
+        artifacts: Vec<String>,
+        base: String,
+        commit: String,
+    },
     /// Arch: Nyx apps by name (`mail`), with the suite's published installer or
     /// uninstaller (`change`: `install`, `update` or `remove`). They run as the user, never in the
     /// helper.
-    NyxApps { change: String, apps: Vec<String> },
+    NyxApps {
+        change: String,
+        apps: Vec<String>,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

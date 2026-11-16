@@ -295,7 +295,9 @@ fn screenshots(app: &App, narrow: bool) -> gtk::Grid {
         let (states, layout) = (states.clone(), layout.clone());
         glib::spawn_future_local(async move {
             let Ok(result) = rx.recv().await else { return };
-            let texture = result.ok().filter(|path| !states.borrow().iter().any(|s| s.as_ref().is_some_and(|p| p.as_ref() == Some(path))))
+            let texture = result
+                .ok()
+                .filter(|path| !states.borrow().iter().any(|s| s.as_ref().is_some_and(|p| p.as_ref() == Some(path))))
                 .and_then(|path| gdk::Texture::from_filename(&path).ok().map(|t| (path, t)));
             match texture {
                 Some((path, texture)) => {

@@ -26,8 +26,7 @@ fn needle_score(app: &App, name: &str, needle: &str) -> u32 {
     if by_name > 0 {
         return by_name;
     }
-    let names: Vec<String> =
-        app.keywords.iter().chain(std::iter::once(&app.package)).map(|n| n.to_lowercase()).collect();
+    let names: Vec<String> = app.keywords.iter().chain(std::iter::once(&app.package)).map(|n| n.to_lowercase()).collect();
     if names.iter().any(|n| n == needle) {
         300
     } else if names.iter().any(|n| n.contains(needle)) {

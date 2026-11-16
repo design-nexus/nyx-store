@@ -124,14 +124,25 @@ pub fn present(
         build(application);
         let cache = nyx_core::paths::cache_dir().join("catalog-refreshed");
         let p = prefs::get();
-        let due = p.catalog_refresh == "startup" || (p.catalog_refresh == "daily" &&
-            cache.metadata().and_then(|m| m.modified()).ok()
-                .and_then(|t| t.elapsed().ok()).is_none_or(|age| age.as_secs() >= 86400));
+        let due = p.catalog_refresh == "startup"
+            || (p.catalog_refresh == "daily"
+                && cache
+                    .metadata()
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .and_then(|t| t.elapsed().ok())
+                    .is_none_or(|age| age.as_secs() >= 86400));
         refresh(due);
         glib::timeout_add_seconds_local(60, || {
             let marker = nyx_core::paths::cache_dir().join("catalog-refreshed");
-            if prefs::get().catalog_refresh == "daily" && marker.metadata().and_then(|m| m.modified()).ok()
-                .and_then(|t| t.elapsed().ok()).is_none_or(|age| age.as_secs() >= 86400) {
+            if prefs::get().catalog_refresh == "daily"
+                && marker
+                    .metadata()
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .and_then(|t| t.elapsed().ok())
+                    .is_none_or(|age| age.as_secs() >= 86400)
+            {
                 refresh(true);
             }
             glib::ControlFlow::Continue
@@ -177,7 +188,8 @@ fn offer_removal() {
     let u = ui();
     let Some(id) = u.pending_remove.borrow_mut().take() else { return };
     let owner = launcher_owner(&id);
-    let found = u.catalog.borrow().as_ref().and_then(|c| nyx_store::model::installed_app(&c.apps, &id, owner.as_deref()).cloned());
+    let found =
+        u.catalog.borrow().as_ref().and_then(|c| nyx_store::model::installed_app(&c.apps, &id, owner.as_deref()).cloned());
     match found {
         Some(app) => details(app),
         None => notice("This app wasn't installed through a source Store manages."),
@@ -190,11 +202,8 @@ fn offer_removal() {
 fn launcher_owner(id: &str) -> Option<String> {
     let file = format!("applications/{}.desktop", id.trim_end_matches(".desktop"));
     let nix = nyx_store::nix::active();
-    std::iter::once(glib::user_data_dir())
-        .chain(glib::system_data_dirs())
-        .map(|d| d.join(&file))
-        .filter(|p| p.exists())
-        .find_map(|path| {
+    std::iter::once(glib::user_data_dir()).chain(glib::system_data_dirs()).map(|d| d.join(&file)).filter(|p| p.exists()).find_map(
+        |path| {
             if nix {
                 let real = std::fs::canonicalize(&path).ok()?;
                 return nyx_store::model::nix_store_name(&real.to_string_lossy());
@@ -202,7 +211,8 @@ fn launcher_owner(id: &str) -> Option<String> {
             let out = std::process::Command::new("/usr/bin/pacman").arg("-Qqo").arg(&path).output().ok()?;
             let name = String::from_utf8_lossy(&out.stdout).lines().next()?.trim().to_string();
             (out.status.success() && !name.is_empty()).then_some(name)
-        })
+        },
+    )
 }
 
 /// The search's width in characters, in a full window and a narrow one.
@@ -437,27 +447,29 @@ fn build(app: &gtk::Application) {
                 });
                 glib::spawn_future_local(async move {
                     if let Ok(result) = rx.recv().await
-                        && prefs::get().include_aur && ui().search_generation.get() == generation {
-                            ui().searching.set(false);
-                            match result {
-                                Ok(mut apps) => {
-                                    if let Some(c) = ui().catalog.borrow().as_ref() {
-                                        for a in &mut apps {
-                                            a.installed = c.installed.get(&a.package).map(|p| p.version.clone());
-                                            let base = a.package.trim_end_matches("-bin").trim_end_matches("-git");
-                                            if let Some(meta) = c.apps.iter().find(|p| p.desktop && p.package == base) {
-                                                a.desktop = true;
-                                                a.icon = meta.icon.clone();
-                                                a.category = meta.category.clone();
-                                            }
+                        && prefs::get().include_aur
+                        && ui().search_generation.get() == generation
+                    {
+                        ui().searching.set(false);
+                        match result {
+                            Ok(mut apps) => {
+                                if let Some(c) = ui().catalog.borrow().as_ref() {
+                                    for a in &mut apps {
+                                        a.installed = c.installed.get(&a.package).map(|p| p.version.clone());
+                                        let base = a.package.trim_end_matches("-bin").trim_end_matches("-git");
+                                        if let Some(meta) = c.apps.iter().find(|p| p.desktop && p.package == base) {
+                                            a.desktop = true;
+                                            a.icon = meta.icon.clone();
+                                            a.category = meta.category.clone();
                                         }
                                     }
-                                    *ui().aur.borrow_mut() = apps;
                                 }
-                                Err(e) => *ui().search_error.borrow_mut() = e,
+                                *ui().aur.borrow_mut() = apps;
                             }
-                            render();
+                            Err(e) => *ui().search_error.borrow_mut() = e,
                         }
+                        render();
+                    }
                 });
             });
         }
@@ -569,7 +581,13 @@ fn responsive() {
     }
     u.search.set_width_chars(if narrow { SEARCH_NARROW } else { SEARCH_WIDE });
     show_status();
-    let tier = if narrow { 0 } else if width < WIDE_WIDTH { 1 } else { 2 };
+    let tier = if narrow {
+        0
+    } else if width < WIDE_WIDTH {
+        1
+    } else {
+        2
+    };
     u.search_hint.set_visible(tier > 0 && u.search.text().is_empty());
     if u.tier.replace(tier) != tier {
         render();
@@ -866,7 +884,9 @@ fn place_name(c: Option<&Catalog>, page: &str, category: &str) -> String {
                 return "Everyday essentials".into();
             }
             match category.strip_prefix("catalog:") {
-                Some(id) => c.and_then(|c| c.groups.iter().find(|g| g.id == id)).map(|g| g.name.clone()).unwrap_or_else(|| id.into()),
+                Some(id) => {
+                    c.and_then(|c| c.groups.iter().find(|g| g.id == id)).map(|g| g.name.clone()).unwrap_or_else(|| id.into())
+                }
                 None => category.into(),
             }
         }
@@ -1036,7 +1056,12 @@ fn render_categories(c: &Catalog) {
         for (g, count) in groups {
             let key = format!("catalog:{}", g.id);
             let noun = if c.apps.iter().any(|a| a.group.0 == g.id && a.desktop) { "apps" } else { "tools" };
-            grid.insert(&tile(&g.name, &format!("{count} {noun}"), section_icon(&section), theme::tone(&section_name), move || open_category(key.clone())), -1);
+            grid.insert(
+                &tile(&g.name, &format!("{count} {noun}"), section_icon(&section), theme::tone(&section_name), move || {
+                    open_category(key.clone())
+                }),
+                -1,
+            );
         }
         u.body.append(&grid);
     }
@@ -1053,7 +1078,10 @@ fn render_category(c: &Catalog, key: &str) {
         None if key == "essentials" => {
             ("Everyday essentials".into(), browsable(c).into_iter().filter(|a| a.desktop && a.popular).collect())
         }
-        None => (place_name(Some(c), "categories", key), browsable(c).into_iter().filter(|a| a.desktop && a.category == key).collect()),
+        None => (
+            place_name(Some(c), "categories", key),
+            browsable(c).into_iter().filter(|a| a.desktop && a.category == key).collect(),
+        ),
     };
     if !key.starts_with("catalog:") {
         apps.sort_by_cached_key(|a| (a.source != nyx_store::nix::NYXOS && !a.popular, a.name.to_lowercase()));
@@ -1079,11 +1107,8 @@ fn render_category(c: &Catalog, key: &str) {
 fn render_nyx(c: &Catalog) {
     let apps: Vec<&App> = c.apps.iter().filter(|a| a.nyx).collect();
     let have = apps.iter().filter(|a| a.installed.is_some()).count();
-    let here = if nyx_store::nix::active() {
-        ""
-    } else {
-        " Here they install into your home folder from their published releases."
-    };
+    let here =
+        if nyx_store::nix::active() { "" } else { " Here they install into your home folder from their published releases." };
     heading(
         "Nyx Apps",
         &format!("Apps made for NyxOS, in one design and working together.{here} {have} of {} installed.", apps.len()),
@@ -1153,9 +1178,9 @@ fn installed_list(c: &Catalog) -> Vec<&App> {
     for a in c.apps.iter().filter(|a| a.installed.is_some() && a.desktop) {
         // The source it was installed from, when another has it too.
         if c.sources.get(&a.package).is_some_and(|(s, _)| s != &a.source)
-            && c.apps.iter().any(|other| {
-                other.package == a.package && c.sources.get(&a.package).is_some_and(|(s, _)| s == &other.source)
-            })
+            && c.apps
+                .iter()
+                .any(|other| other.package == a.package && c.sources.get(&a.package).is_some_and(|(s, _)| s == &other.source))
         {
             continue;
         }
@@ -1175,16 +1200,17 @@ fn render_search(c: &Catalog) {
     let include = u.include_packages.get();
     let nix = nyx_store::nix::active();
     let aur = u.aur.borrow();
-    let matched: Vec<&App> =
-        c.apps.iter().chain(aur.iter()).filter(|a| nyx_store::search::score(a, &query).is_some()).collect();
+    let matched: Vec<&App> = c.apps.iter().chain(aur.iter()).filter(|a| nyx_store::search::score(a, &query).is_some()).collect();
     let shown = |a: &App, filter: Option<&str>| match filter {
         None => include || a.desktop || a.source == nyx_store::nix::NYXOS,
         Some("nyx") => a.nyx,
         Some(s) => {
-            a.source == s && (include || a.desktop || matches!(s, "aur") || s == nyx_store::nix::NIXPKGS || s == nyx_store::nix::NYXOS)
+            a.source == s
+                && (include || a.desktop || matches!(s, "aur") || s == nyx_store::nix::NIXPKGS || s == nyx_store::nix::NYXOS)
         }
     };
-    let results_for = |f: Option<&str>| nyx_store::search::rank(matched.iter().copied().filter(|a| shown(a, f)), &query, f.is_none());
+    let results_for =
+        |f: Option<&str>| nyx_store::search::rank(matched.iter().copied().filter(|a| shown(a, f)), &query, f.is_none());
     let results = results_for(filter.as_deref());
 
     let head = widgets::hbox(10);
@@ -1562,7 +1588,10 @@ fn render_nixos_updates(c: &Catalog) {
             ui().body.append(&row);
         }
     }
-    heading("System generations", "Every system change makes a new generation. Going back undoes the last one, software and settings with it; your files stay.");
+    heading(
+        "System generations",
+        "Every system change makes a new generation. Going back undoes the last one, software and settings with it; your files stay.",
+    );
     let (count, current, previous) = nyx_store::nix::generations();
     let detail = match current {
         Some(n) => format!("This is generation {n}; {count} are kept. Older ones are also in the boot menu."),
@@ -1843,11 +1872,12 @@ fn source_review() {
         let mut assignments = Vec::new();
         for (check, dd, options, packages) in &selections {
             if check.is_active()
-                && let Some(source) = options.get(dd.selected() as usize).filter(|s| s.as_str() != "Leave unresolved") {
-                    for (name, stamp) in packages {
-                        assignments.push((name.clone(), source.clone(), stamp.clone()));
-                    }
+                && let Some(source) = options.get(dd.selected() as usize).filter(|s| s.as_str() != "Leave unresolved")
+            {
+                for (name, stamp) in packages {
+                    assignments.push((name.clone(), source.clone(), stamp.clone()));
                 }
+            }
         }
         if assignments.is_empty() {
             toast("Select at least one source group to confirm.");
@@ -2077,9 +2107,10 @@ fn transaction_review(plan: Plan) {
     card.append(&actions);
     dialog.connect_close_request(move |_| {
         if !approved.get()
-            && let Some(tx) = ui().confirmation.borrow().as_ref() {
-                let _ = tx.send(None);
-            }
+            && let Some(tx) = ui().confirmation.borrow().as_ref()
+        {
+            let _ = tx.send(None);
+        }
         glib::Propagation::Proceed
     });
     dialog.present();
@@ -2266,9 +2297,17 @@ fn settings() {
                 render();
             });
             group.append(&row);
-            let (row, _) = widgets::choice_row("Refresh the catalog", "Manual refresh is always available with Ctrl+R.",
-                vec![("startup".into(), "On start".into()), ("daily".into(), "Daily".into()), ("manual".into(), "Manually".into())],
-                &p.catalog_refresh, |id| prefs::update(|p| p.catalog_refresh = id));
+            let (row, _) = widgets::choice_row(
+                "Refresh the catalog",
+                "Manual refresh is always available with Ctrl+R.",
+                vec![
+                    ("startup".into(), "On start".into()),
+                    ("daily".into(), "Daily".into()),
+                    ("manual".into(), "Manually".into()),
+                ],
+                &p.catalog_refresh,
+                |id| prefs::update(|p| p.catalog_refresh = id),
+            );
             group.append(&row);
             (page.root.upcast(), page.body)
         },
@@ -2369,14 +2408,12 @@ fn app_icon(app: &App, size: i32) -> gtk::Widget {
         let weak = image.downgrade();
         glib::spawn_future_local(async move {
             if let Ok(Ok(path)) = rx.recv().await
-                && let Some(image) = weak.upgrade() {
-                    let paintable = gtk::IconPaintable::for_file(
-                        &gio::File::for_path(path),
-                        image.pixel_size().max(16),
-                        image.scale_factor(),
-                    );
-                    image.set_paintable(Some(&paintable));
-                }
+                && let Some(image) = weak.upgrade()
+            {
+                let paintable =
+                    gtk::IconPaintable::for_file(&gio::File::for_path(path), image.pixel_size().max(16), image.scale_factor());
+                image.set_paintable(Some(&paintable));
+            }
         });
     }
     image.upcast()
@@ -2392,21 +2429,22 @@ fn load_picture(app: &App, index: usize, picture: &gtk::Picture) {
     let weak = picture.downgrade();
     glib::spawn_future_local(async move {
         if let Ok(result) = rx.recv().await
-            && let Some(picture) = weak.upgrade() {
-                match result {
-                    Ok(path) => match gdk::Texture::from_filename(path) {
-                        Ok(texture) => {
-                            picture.set_paintable(Some(&texture));
-                            picture.set_visible(true);
-                        }
-                        Err(_) => picture.set_visible(false),
-                    },
-                    Err(error) => {
-                        picture.set_tooltip_text(Some(&error.to_string()));
-                        picture.set_visible(false);
+            && let Some(picture) = weak.upgrade()
+        {
+            match result {
+                Ok(path) => match gdk::Texture::from_filename(path) {
+                    Ok(texture) => {
+                        picture.set_paintable(Some(&texture));
+                        picture.set_visible(true);
                     }
+                    Err(_) => picture.set_visible(false),
+                },
+                Err(error) => {
+                    picture.set_tooltip_text(Some(&error.to_string()));
+                    picture.set_visible(false);
                 }
             }
+        }
     });
 }
 

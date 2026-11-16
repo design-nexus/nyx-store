@@ -142,13 +142,15 @@ pub fn screenshot(cache: &Path, app: &App, index: usize) -> Result<PathBuf> {
     let resolved = directory.join(format!("{}-{index}.url", app.package));
     let mut urls = Vec::new();
     if let Ok(url) = fs::read_to_string(&resolved)
-        && url.starts_with("https://") {
-            urls.push(url);
-        }
+        && url.starts_with("https://")
+    {
+        urls.push(url);
+    }
     if let Some(url) = app.screenshots.get(index)
-        && !urls.contains(url) {
-            urls.push(url.clone());
-        }
+        && !urls.contains(url)
+    {
+        urls.push(url.clone());
+    }
     let mut failures = Vec::new();
     for mirrored in [false, true] {
         if mirrored {
