@@ -17,8 +17,11 @@ pub(super) fn render(catalog: &Catalog) {
     }
     let shelf_size = if narrow { 4 } else { 6 };
     featured(&apps, tier == 2);
+    // NyxOS's own apps first; the essentials beside them are ones the suite doesn't have
+    // (not a browser, an office suite or a password manager, which it ships).
+    nyx_shelf(catalog, narrow);
     let picks: Vec<App> =
-        ["firefox", "libreoffice-fresh", "libreoffice", "keepassxc", "vlc", "signal-desktop", "signal", "obsidian"]
+        ["vlc", "signal-desktop", "signal", "obsidian", "telegram-desktop", "spotify", "zoom-us", "thunderbird"]
             .iter()
             .filter_map(|name| apps.iter().find(|a| a.package == *name).cloned())
             .take(shelf_size)
@@ -28,7 +31,6 @@ pub(super) fn render(catalog: &Catalog) {
         section_head("Everyday essentials", "starred-symbolic", more);
         grid(&picks);
     }
-    nyx_shelf(catalog, narrow);
     bundles(catalog, narrow);
     for (category, title) in [
         ("Graphics", "Make something extraordinary"),

@@ -259,8 +259,13 @@ fn build(app: &gtk::Application) {
     foot_row.set_tooltip_text(Some("Refresh catalog (Ctrl+R)"));
     foot_row.connect_clicked(|_| refresh(true));
     let foot_content = widgets::hbox(6);
+    // A spinner while the catalog loads; the check mark once it has.
+    let loading = gtk::Spinner::new();
+    loading.start();
+    foot_content.append(&loading);
     let checked = gtk::Image::from_icon_name("emblem-default-symbolic");
     checked.add_css_class("foot-ok");
+    checked.set_visible(false);
     foot_content.append(&checked);
     let foot = widgets::label("Loading apps…", "foot-text");
     foot.set_ellipsize(gtk::pango::EllipsizeMode::End);
@@ -726,6 +731,7 @@ fn refresh(network: bool) {
                 }
                 Err(e) => {
                     u.foot.set_text("Catalog unavailable");
+                    foot_mark(&u.foot, false);
                     notice(&e);
                 }
             }
@@ -898,6 +904,17 @@ fn update_badges(c: &Catalog) {
 }
 
 /// Under the sidebar: the catalog's apps and when it was last refreshed.
+/// The foot's mark: the spinner goes; the check mark shows when the catalog loaded.
+fn foot_mark(foot: &gtk::Label, loaded: bool) {
+    let checked = foot.prev_sibling();
+    if let Some(spinner) = checked.as_ref().and_then(|c| c.prev_sibling()) {
+        spinner.set_visible(false);
+    }
+    if let Some(c) = checked {
+        c.set_visible(loaded);
+    }
+}
+
 fn update_foot(c: &Catalog) {
     let apps = c.apps.iter().filter(|a| a.desktop).map(|a| &a.package).collect::<BTreeSet<_>>().len();
     let checked = nyx_core::paths::cache_dir()
@@ -908,6 +925,7 @@ fn update_foot(c: &Catalog) {
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| format!(" · checked {}", ago_short(d.as_secs() as i64)));
     ui().foot.set_text(&format!("{} apps{}", thousands(apps), checked.unwrap_or_default()));
+    foot_mark(&ui().foot, true);
 }
 
 /// 1148 as "1,148".
