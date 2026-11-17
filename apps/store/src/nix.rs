@@ -479,6 +479,8 @@ struct Work {
     flake_install: Vec<String>,
     flake_remove: Vec<String>,
     update: bool,
+    /// The system's part of the update is built and waiting (`nyx update --prepare`).
+    prepared: bool,
     rollback: bool,
     plan: Plan,
 }
@@ -492,6 +494,7 @@ fn work(request: &Request) -> Result<Work> {
         flake_install: Vec::new(),
         flake_remove: Vec::new(),
         update: false,
+        prepared: false,
         rollback: false,
         plan: Plan::default(),
     };
@@ -578,11 +581,44 @@ fn work(request: &Request) -> Result<Work> {
             // `nyx update`'s own plan: the system, coding agents, Flatpaks and the nix
             // profile. Firmware isn't updated from here.
             w.update = true;
-            let plan: serde_json::Value = serde_json::from_str(&command("nyx-system", &["update", "--dry-run", "--json"])?)?;
+            // The system's part is built first, so the review shows what it changes.
+            let plan: serde_json::Value = serde_json::from_str(&command("nyx-system", &["update", "--prepare", "--json"])?)?;
             let text = |v: &serde_json::Value| v.as_str().map(String::from);
+            let preview = &plan["preview"];
+            w.prepared = preview["prepared"] == true;
+            let has_system = plan["steps"].as_array().is_some_and(|s| s.iter().any(|s| s["kind"] == "system"));
+            for c in preview["changes"].as_array().into_iter().flatten().filter(|_| w.prepared) {
+                w.plan.changes.push(Change {
+                    name: text(&c["name"]).unwrap_or_default(),
+                    old: text(&c["from"]),
+                    new: text(&c["to"]),
+                    source: "NyxOS".into(),
+                    bytes: 0,
+                });
+            }
+            if w.prepared {
+                if let Some(bytes) = preview["sizeChange"].as_i64() {
+                    let mb = (bytes as f64 / 1e6).abs().round();
+                    w.plan.notes.push(format!("The system's files {} by {mb} MB.", if bytes >= 0 { "grow" } else { "shrink" }));
+                }
+                if preview["reboot"] == true {
+                    w.plan.notes.push("Restart the computer afterwards: the kernel changes.".into());
+                }
+                if let Some(apps) = preview["restart"].as_array().filter(|a| !a.is_empty()) {
+                    let names: Vec<String> = apps.iter().filter_map(text).collect();
+                    w.plan.notes.push(format!("Reopen afterwards: {}.", names.join(", ")));
+                }
+            }
             for item in plan["items"].as_array().into_iter().flatten() {
                 let how = text(&item["how"]).unwrap_or_default();
                 if how.starts_with("firmware") {
+                    continue;
+                }
+                // The system's own line is replaced by its package changes above.
+                if has_system
+                    && w.prepared
+                    && matches!(how.as_str(), "the system channel" | "comes with the system channel" | "a NyxOS tool")
+                {
                     continue;
                 }
                 w.plan.changes.push(Change {
@@ -658,8 +694,9 @@ fn step(send: &async_channel::Sender<Event>, program: &str, args: &[&str], input
 
 /// `nyx update` without questions: its progress as status, then what came of it (each
 /// part that failed, or what finishing it takes).
-fn update(send: &async_channel::Sender<Event>) -> Result<String> {
-    let args = ["update", "--yes", "--json"];
+fn update(send: &async_channel::Sender<Event>, prepared: bool) -> Result<String> {
+    // Switch to exactly what the review showed.
+    let args: &[&str] = if prepared { &["update", "--finish", "--yes", "--json"] } else { &["update", "--yes", "--json"] };
     let _ = send.send_blocking(Event::Status { message: format!("nyx-system {}", args.join(" ")) });
     let mut child = Command::new("nyx-system")
         .args(args)
@@ -707,7 +744,7 @@ fn apply(w: &Work, send: &async_channel::Sender<Event>) -> Result<String> {
         return Ok("Back to the previous generation".into());
     }
     if w.update {
-        return update(send);
+        return update(send, w.prepared);
     }
     // Each stage on its own: when a later one fails, say what was done before it.
     let mut done: Vec<&str> = Vec::new();
@@ -743,12 +780,21 @@ fn apply(w: &Work, send: &async_channel::Sender<Event>) -> Result<String> {
 /// The window's transaction: a plan to review, then the System Manager, flatpak or nix.
 pub fn start(request: Request, send: async_channel::Sender<Event>, confirmation: std::sync::mpsc::Receiver<Option<Plan>>) {
     let result = (|| -> Result<Option<String>> {
+        if matches!(request, Request::Update) {
+            let _ = send.send_blocking(Event::Status { message: "Building the system update to see what it changes…".into() });
+        }
         let w = work(&request)?;
         ensure!(!w.plan.changes.is_empty(), "That's already installed");
         let _ = send.send_blocking(Event::Plan { plan: w.plan.clone() });
         match confirmation.recv() {
             Ok(Some(_)) => apply(&w, &send).map(Some),
-            _ => Ok(None),
+            _ => {
+                // Not wanted: the prepared system update is set aside.
+                if w.prepared {
+                    let _ = command("nyx-system", &["update", "--discard"]);
+                }
+                Ok(None)
+            }
         }
     })();
     let _ = send.send_blocking(match result {
