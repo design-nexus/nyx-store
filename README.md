@@ -1,8 +1,14 @@
 # Store
 
-A native software store for Omarchy, part of Nyx. Browse desktop apps, discover
-curated Arch favorites, search AUR, install and remove apps, and review coordinated
-system updates. Uses the shared Nyx theme, settings card and keyboard conventions.
+A native software store for NyxOS and Omarchy, part of Nyx. Browse and search apps,
+install and remove them, and review system updates. On NyxOS it installs from the
+NyxOS catalog (the Nyx apps and curated software, shared with Welcome), nixpkgs and
+Flathub; on Omarchy, from Arch's repositories, curated Arch favorites and the AUR.
+Uses the shared Nyx theme, settings card and keyboard conventions.
+
+## Install
+
+On NyxOS, Store comes with the system. On Omarchy:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/design-nexus/nyx-store/main/install.sh | bash
@@ -14,7 +20,7 @@ The installer installs the UI to `~/.local` and asks through sudo to install the
 privileged helper and Polkit policy to root-owned locations. Package actions then
 use Polkit. Building alone does not install the helper or change any packages.
 
-## Sources
+## Sources on Omarchy
 
 Omarchy always wins for new packages with the same name. Updates keep their recorded
 source, even when another source has a newer version. Every dependency in a prepared
