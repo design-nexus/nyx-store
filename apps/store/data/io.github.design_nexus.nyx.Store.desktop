@@ -2,11 +2,11 @@
 Type=Application
 Name=Store
 GenericName=Software Store
-Comment=Discover and manage apps for Omarchy
+Comment=Discover, install and update apps
 Exec=nyx-store
 Icon=io.github.design_nexus.nyx.Store
 Terminal=false
 Categories=System;PackageManager;
-Keywords=apps;software;packages;Arch;AUR;Omarchy;
+Keywords=apps;software;packages;install;updates;flatpak;
 StartupNotify=true
 StartupWMClass=io.github.design_nexus.nyx.Store
